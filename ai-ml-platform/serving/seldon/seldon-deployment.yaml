@@ -1,0 +1,329 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: seldon-system
+
+---
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: seldon-core
+  namespace: seldon-system
+spec:
+  chart: seldon-core-operator
+  repo: https://storage.googleapis.com/seldon-charts
+  targetNamespace: seldon-system
+  valuesContent: |-
+    istio:
+      enabled: true
+      gateway: seldon-system/seldon-gateway
+    
+    ambassador:
+      enabled: false
+    
+    certManager:
+      enabled: true
+    
+    controllerId: ""
+    
+    crd:
+      create: true
+    
+    defaultUserID: "8888"
+    
+    executor:
+      enabled: true
+      image:
+        registry: docker.io
+        repository: seldonio/seldon-core-executor
+        tag: 1.17.1
+      
+      resources:
+        requests:
+          memory: "512Mi"
+          cpu: "500m"
+        limits:
+          memory: "1Gi"
+          cpu: "1000m"
+    
+    explainer:
+      enabled: true
+      image:
+        registry: docker.io
+        repository: seldonio/alibi-explain-server
+        tag: 1.17.1
+    
+    image:
+      registry: docker.io
+      repository: seldonio/seldon-core-operator
+      tag: 1.17.1
+    
+    kubeflow: false
+    
+    manager:
+      cpuLimit: "500m"
+      cpuRequest: "100m"
+      memoryLimit: "1Gi"
+      memoryRequest: "200Mi"
+    
+    predictiveUnit:
+      defaultEnvSecretRefName: ""
+      grpcMaxMessageSize: "4194304"
+      httpPort: 9000
+      grpcPort: 9500
+      metricsPortName: "metrics"
+      
+    predictor_servers:
+      MLFLOW_SERVER:
+        protocols:
+          seldon:
+            defaultImageVersion: "1.17.1"
+            image: "seldonio/mlflowserver"
+      SKLEARN_SERVER:
+        protocols:
+          seldon:
+            defaultImageVersion: "1.17.1" 
+            image: "seldonio/sklearnserver"
+      TENSORFLOW_SERVER:
+        protocols:
+          tensorflow:
+            defaultImageVersion: "2.6.2"
+            image: "tensorflow/serving"
+      XGBOOST_SERVER:
+        protocols:
+          seldon:
+            defaultImageVersion: "1.17.1"
+            image: "seldonio/xgboostserver"
+    
+    rbac:
+      configmap:
+        create: true
+      create: true
+    
+    serviceAccount:
+      create: true
+    
+    singleNamespace: false
+    
+    storageInitializer:
+      image: "gcr.io/kfserving/storage-initializer:v0.6.1"
+      cpuLimit: "1"
+      cpuRequest: "100m"
+      memoryLimit: "1Gi"
+      memoryRequest: "100Mi"
+    
+    usageMetrics:
+      enabled: false
+
+---
+apiVersion: networking.istio.io/v1alpha3
+kind: Gateway
+metadata:
+  name: seldon-gateway
+  namespace: seldon-system
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+  - port:
+      number: 80
+      name: http
+      protocol: HTTP
+    hosts:
+    - "*.seldon.local"
+    - "seldon.local"
+  - port:
+      number: 443
+      name: https
+      protocol: HTTPS
+    tls:
+      mode: SIMPLE
+      credentialName: seldon-ssl-cert
+    hosts:
+    - "*.seldon.local"
+    - "seldon.local"
+
+---
+apiVersion: machinelearning.seldon.io/v1
+kind: SeldonDeployment
+metadata:
+  name: sklearn-iris-predictor
+  namespace: seldon-system
+spec:
+  name: sklearn-iris
+  predictors:
+  - componentSpecs:
+    - spec:
+        containers:
+        - image: seldonio/sklearnserver:1.17.1
+          name: classifier
+          env:
+          - name: MODEL_URI
+            value: "gs://seldon-models/sklearn/iris"
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "500m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+    graph:
+      children: []
+      implementation: SKLEARN_SERVER
+      modelUri: "gs://seldon-models/sklearn/iris"
+      name: classifier
+    name: default
+    replicas: 2
+    traffic: 100
+
+---
+apiVersion: machinelearning.seldon.io/v1
+kind: SeldonDeployment
+metadata:
+  name: mlflow-model-server
+  namespace: seldon-system
+spec:
+  name: mlflow-model
+  predictors:
+  - componentSpecs:
+    - spec:
+        containers:
+        - image: seldonio/mlflowserver:1.17.1
+          name: mlflow-model
+          env:
+          - name: MLFLOW_TRACKING_URI
+            value: "http://mlflow-server.mlflow:5000"
+          - name: MODEL_URI
+            value: "models:/customer-churn-predictor/Production"
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+    graph:
+      children: []
+      implementation: MLFLOW_SERVER
+      modelUri: "models:/customer-churn-predictor/Production"
+      name: mlflow-model
+    name: default
+    replicas: 3
+    traffic: 100
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: model-serving-config
+  namespace: seldon-system
+data:
+  serving.yaml: |
+    # Seldon Core Model Serving Configuration
+    
+    # Default resource requirements
+    defaultResources:
+      requests:
+        memory: "512Mi"
+        cpu: "500m"
+      limits:
+        memory: "1Gi"
+        cpu: "1000m"
+    
+    # Autoscaling configuration
+    autoscaling:
+      enabled: true
+      minReplicas: 1
+      maxReplicas: 10
+      targetCPUUtilizationPercentage: 70
+      targetMemoryUtilizationPercentage: 80
+    
+    # Supported model frameworks
+    supportedFrameworks:
+      - sklearn
+      - tensorflow
+      - pytorch
+      - xgboost
+      - mlflow
+      - custom
+    
+    # Model deployment policies
+    deploymentPolicies:
+      canary:
+        enabled: true
+        trafficSplit: 10  # Percentage for canary
+        duration: "1h"    # Canary duration
+        metrics:
+          - name: "accuracy"
+            threshold: 0.85
+          - name: "latency_p95"
+            threshold: 100  # ms
+      
+      blueGreen:
+        enabled: true
+        autoPromote: false
+        prePromotionAnalysis:
+          duration: "10m"
+          metrics:
+            - name: "error_rate"
+              threshold: 0.01
+    
+    # Model monitoring
+    monitoring:
+      metrics:
+        enabled: true
+        customMetrics:
+          - name: "prediction_drift"
+            threshold: 0.1
+          - name: "data_drift" 
+            threshold: 0.1
+      
+      logging:
+        enabled: true
+        logLevel: "INFO"
+        logRequests: true
+        logResponses: false  # Privacy consideration
+    
+    # Security settings
+    security:
+      authentication:
+        enabled: false  # Enable for production
+        method: "jwt"
+      
+      authorization:
+        enabled: false  # Enable for production
+        rbac: true
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: model-serving-metrics
+  namespace: seldon-system
+  labels:
+    app: seldon-core
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8080
+    targetPort: 8080
+    name: metrics
+  selector:
+    app.kubernetes.io/name: seldon-core-operator
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: seldon-core-metrics
+  namespace: seldon-system
+  labels:
+    app: seldon-core
+spec:
+  selector:
+    matchLabels:
+      app: seldon-core
+  endpoints:
+  - port: metrics
+    interval: 30s
+    path: /metrics

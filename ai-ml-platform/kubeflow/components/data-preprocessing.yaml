@@ -1,0 +1,189 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: data-preprocessing-component
+  namespace: kubeflow
+spec:
+  entrypoint: data-preprocessing
+  templates:
+  - name: data-preprocessing
+    inputs:
+      parameters:
+      - name: input_data_path
+        description: "Path to input data (S3, GCS, etc.)"
+      - name: output_data_path
+        description: "Path to store processed data"
+      - name: preprocessing_config
+        description: "JSON configuration for preprocessing steps"
+        default: '{"normalize": true, "remove_outliers": true, "feature_selection": false}'
+    outputs:
+      parameters:
+      - name: processed_data_path
+        valueFrom:
+          path: /tmp/outputs/processed_data_path.txt
+      - name: data_statistics
+        valueFrom:
+          path: /tmp/outputs/data_statistics.json
+      artifacts:
+      - name: processed-dataset
+        path: /tmp/processed_data
+        s3:
+          endpoint: s3.amazonaws.com
+          bucket: "{{workflow.parameters.artifacts_bucket}}"
+          key: "processed_data/{{workflow.name}}/dataset.parquet"
+          accessKeySecret:
+            name: s3-credentials
+            key: accessKey
+          secretKeySecret:
+            name: s3-credentials
+            key: secretKey
+    container:
+      image: pandas/pandas:latest
+      command: [python]
+      args:
+      - -c
+      - |
+        import pandas as pd
+        import numpy as np
+        import json
+        import os
+        from pathlib import Path
+        from sklearn.preprocessing import StandardScaler, MinMaxScaler
+        from sklearn.feature_selection import SelectKBest, f_classif
+        import boto3
+        import pyarrow.parquet as pq
+        
+        # Input parameters
+        input_data_path = "{{inputs.parameters.input_data_path}}"
+        output_data_path = "{{inputs.parameters.output_data_path}}"
+        config = json.loads('{{inputs.parameters.preprocessing_config}}')
+        
+        print(f"Starting data preprocessing...")
+        print(f"Input: {input_data_path}")
+        print(f"Output: {output_data_path}")
+        print(f"Config: {config}")
+        
+        # Create output directories
+        os.makedirs("/tmp/outputs", exist_ok=True)
+        os.makedirs("/tmp/processed_data", exist_ok=True)
+        
+        # Load data (placeholder - replace with actual data loading)
+        # For demo, create sample data
+        np.random.seed(42)
+        n_samples = 1000
+        n_features = 10
+        
+        # Generate sample dataset
+        X = np.random.randn(n_samples, n_features)
+        y = np.random.randint(0, 2, n_samples)
+        
+        # Create DataFrame
+        feature_names = [f"feature_{i}" for i in range(n_features)]
+        df = pd.DataFrame(X, columns=feature_names)
+        df['target'] = y
+        
+        print(f"Loaded dataset shape: {df.shape}")
+        
+        # Data preprocessing steps
+        processed_df = df.copy()
+        statistics = {}
+        
+        # 1. Handle missing values
+        missing_before = processed_df.isnull().sum().sum()
+        processed_df = processed_df.fillna(processed_df.mean())
+        statistics['missing_values_filled'] = int(missing_before)
+        
+        # 2. Remove outliers (if configured)
+        if config.get('remove_outliers', False):
+            print("Removing outliers...")
+            Q1 = processed_df.quantile(0.25)
+            Q3 = processed_df.quantile(0.75)
+            IQR = Q3 - Q1
+            
+            # Remove outliers for numerical columns only
+            numerical_cols = processed_df.select_dtypes(include=[np.number]).columns
+            numerical_cols = numerical_cols.drop('target', errors='ignore')
+            
+            outlier_mask = ~((processed_df[numerical_cols] < (Q1[numerical_cols] - 1.5 * IQR[numerical_cols])) | 
+                           (processed_df[numerical_cols] > (Q3[numerical_cols] + 1.5 * IQR[numerical_cols]))).any(axis=1)
+            
+            rows_before = len(processed_df)
+            processed_df = processed_df[outlier_mask]
+            rows_after = len(processed_df)
+            statistics['outliers_removed'] = rows_before - rows_after
+        
+        # 3. Normalize features (if configured)
+        if config.get('normalize', False):
+            print("Normalizing features...")
+            feature_cols = [col for col in processed_df.columns if col != 'target']
+            
+            scaler = StandardScaler()
+            processed_df[feature_cols] = scaler.fit_transform(processed_df[feature_cols])
+            statistics['normalization_applied'] = True
+        
+        # 4. Feature selection (if configured)
+        if config.get('feature_selection', False):
+            print("Performing feature selection...")
+            feature_cols = [col for col in processed_df.columns if col != 'target']
+            X_features = processed_df[feature_cols]
+            y_target = processed_df['target']
+            
+            # Select top k features
+            k = min(5, len(feature_cols))
+            selector = SelectKBest(score_func=f_classif, k=k)
+            X_selected = selector.fit_transform(X_features, y_target)
+            
+            # Get selected feature names
+            selected_features = [feature_cols[i] for i in selector.get_support(indices=True)]
+            processed_df = processed_df[selected_features + ['target']]
+            statistics['features_selected'] = selected_features
+            statistics['features_removed'] = len(feature_cols) - len(selected_features)
+        
+        # Calculate final statistics
+        statistics.update({
+            'final_shape': list(processed_df.shape),
+            'final_columns': list(processed_df.columns),
+            'data_types': processed_df.dtypes.astype(str).to_dict(),
+            'missing_values_final': processed_df.isnull().sum().to_dict(),
+            'numerical_summary': processed_df.describe().to_dict()
+        })
+        
+        print(f"Processed dataset shape: {processed_df.shape}")
+        
+        # Save processed data
+        output_file = "/tmp/processed_data/dataset.parquet"
+        processed_df.to_parquet(output_file, index=False)
+        print(f"Saved processed data to: {output_file}")
+        
+        # Save outputs
+        with open("/tmp/outputs/processed_data_path.txt", "w") as f:
+            f.write(output_file)
+        
+        with open("/tmp/outputs/data_statistics.json", "w") as f:
+            json.dump(statistics, f, indent=2)
+        
+        print("Data preprocessing completed successfully!")
+        print(f"Statistics: {json.dumps(statistics, indent=2)}")
+      
+      env:
+      - name: AWS_DEFAULT_REGION
+        value: us-west-2
+      - name: PYTHONUNBUFFERED
+        value: "1"
+      
+      resources:
+        requests:
+          memory: "2Gi"
+          cpu: "1000m"
+        limits:
+          memory: "4Gi"
+          cpu: "2000m"
+      
+      volumeMounts:
+      - name: shared-storage
+        mountPath: /shared
+    
+    volumes:
+    - name: shared-storage
+      persistentVolumeClaim:
+        claimName: ml-shared-pvc

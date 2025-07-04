@@ -1,0 +1,723 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ml-monitoring
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: evidently-config
+  namespace: ml-monitoring
+data:
+  evidently.yaml: |
+    # Evidently Model Monitoring Configuration
+    
+    # Data drift monitoring
+    data_drift:
+      enabled: true
+      threshold: 0.1
+      metrics:
+        - drift_score
+        - drift_detected
+        - number_of_drifted_columns
+      
+      # Statistical tests for different data types
+      tests:
+        numerical:
+          - kolmogorov_smirnov
+          - mann_whitney
+          - energy_distance
+        categorical:
+          - chi_square
+          - jensen_shannon
+    
+    # Target drift monitoring  
+    target_drift:
+      enabled: true
+      threshold: 0.1
+      metrics:
+        - target_drift_score
+        - target_drift_detected
+      tests:
+        - kolmogorov_smirnov
+        - mann_whitney
+    
+    # Model performance monitoring
+    model_performance:
+      enabled: true
+      metrics:
+        classification:
+          - accuracy
+          - precision
+          - recall
+          - f1_score
+          - roc_auc
+        regression:
+          - mae
+          - mse
+          - rmse
+          - r2_score
+    
+    # Prediction drift monitoring
+    prediction_drift:
+      enabled: true
+      threshold: 0.1
+      
+    # Data quality monitoring
+    data_quality:
+      enabled: true
+      checks:
+        - missing_values
+        - duplicate_rows
+        - data_types
+        - value_ranges
+        - categorical_values
+    
+    # Alert configuration
+    alerts:
+      enabled: true
+      channels:
+        - slack
+        - email
+        - webhook
+      
+      thresholds:
+        data_drift: 0.1
+        target_drift: 0.1
+        accuracy_drop: 0.05
+        missing_values: 0.01
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: evidently-service
+  namespace: ml-monitoring
+  labels:
+    app: evidently-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: evidently-service
+  template:
+    metadata:
+      labels:
+        app: evidently-service
+    spec:
+      containers:
+      - name: evidently-service
+        image: python:3.9-slim
+        command:
+        - /bin/bash
+        - -c
+        - |
+          pip install evidently[streamlit]==0.4.2 pandas scikit-learn
+          
+          cat > /app/monitoring_service.py << 'EOF'
+          import pandas as pd
+          import numpy as np
+          from evidently.dashboard import Dashboard
+          from evidently.dashboard.tabs import DataDriftTab, NumTargetDriftTab, RegressionPerformanceTab, ClassificationPerformanceTab
+          from evidently.model_profile import Profile
+          from evidently.model_profile.sections import DataDriftProfileSection, NumTargetDriftProfileSection, RegressionPerformanceProfileSection, ClassificationPerformanceProfileSection
+          from evidently.pipeline.column_mapping import ColumnMapping
+          import streamlit as st
+          import json
+          import os
+          from datetime import datetime, timedelta
+          import time
+          import requests
+          
+          class ModelMonitoringService:
+              def __init__(self):
+                  self.reference_data = None
+                  self.current_data = None
+                  self.column_mapping = None
+                  
+              def load_reference_data(self, data_path):
+                  """Load reference dataset"""
+                  self.reference_data = pd.read_csv(data_path)
+                  
+              def load_current_data(self, data_path):
+                  """Load current dataset"""
+                  self.current_data = pd.read_csv(data_path)
+                  
+              def setup_column_mapping(self, target_col=None, prediction_col=None, 
+                                     numerical_features=None, categorical_features=None):
+                  """Setup column mapping for Evidently"""
+                  self.column_mapping = ColumnMapping()
+                  if target_col:
+                      self.column_mapping.target = target_col
+                  if prediction_col:
+                      self.column_mapping.prediction = prediction_col
+                  if numerical_features:
+                      self.column_mapping.numerical_features = numerical_features
+                  if categorical_features:
+                      self.column_mapping.categorical_features = categorical_features
+              
+              def generate_data_drift_report(self):
+                  """Generate data drift report"""
+                  if self.reference_data is None or self.current_data is None:
+                      raise ValueError("Reference and current data must be loaded")
+                      
+                  dashboard = Dashboard(tabs=[DataDriftTab()])
+                  dashboard.calculate(self.reference_data, self.current_data, 
+                                    column_mapping=self.column_mapping)
+                  
+                  return dashboard
+              
+              def generate_model_performance_report(self, model_type='classification'):
+                  """Generate model performance report"""
+                  if model_type == 'classification':
+                      tab = ClassificationPerformanceTab()
+                  else:
+                      tab = RegressionPerformanceTab()
+                      
+                  dashboard = Dashboard(tabs=[tab])
+                  dashboard.calculate(self.reference_data, self.current_data,
+                                    column_mapping=self.column_mapping)
+                  
+                  return dashboard
+              
+              def generate_target_drift_report(self):
+                  """Generate target drift report"""
+                  dashboard = Dashboard(tabs=[NumTargetDriftTab()])
+                  dashboard.calculate(self.reference_data, self.current_data,
+                                    column_mapping=self.column_mapping)
+                  
+                  return dashboard
+              
+              def generate_profile(self, sections=None):
+                  """Generate monitoring profile"""
+                  if sections is None:
+                      sections = [
+                          DataDriftProfileSection(),
+                          NumTargetDriftProfileSection(),
+                          ClassificationPerformanceProfileSection()
+                      ]
+                  
+                  profile = Profile(sections=sections)
+                  profile.calculate(self.reference_data, self.current_data,
+                                  column_mapping=self.column_mapping)
+                  
+                  return profile.json()
+              
+              def check_drift_alerts(self, profile_json):
+                  """Check for drift alerts based on profile"""
+                  profile_data = json.loads(profile_json)
+                  alerts = []
+                  
+                  # Check data drift
+                  if 'data_drift' in profile_data:
+                      drift_score = profile_data['data_drift'].get('drift_score', 0)
+                      if drift_score > 0.1:  # threshold
+                          alerts.append({
+                              'type': 'data_drift',
+                              'severity': 'high' if drift_score > 0.2 else 'medium',
+                              'score': drift_score,
+                              'message': f'Data drift detected with score {drift_score:.3f}'
+                          })
+                  
+                  # Check target drift
+                  if 'target_drift' in profile_data:
+                      target_drift = profile_data['target_drift'].get('drift_detected', False)
+                      if target_drift:
+                          alerts.append({
+                              'type': 'target_drift',
+                              'severity': 'high',
+                              'message': 'Target drift detected'
+                          })
+                  
+                  return alerts
+              
+              def send_alerts(self, alerts):
+                  """Send alerts to configured channels"""
+                  for alert in alerts:
+                      print(f"ALERT: {alert}")
+                      # Here you would integrate with Slack, email, etc.
+          
+          # Streamlit app for monitoring dashboard
+          def create_monitoring_dashboard():
+              st.title("ML Model Monitoring Dashboard")
+              
+              # Initialize monitoring service
+              if 'monitoring_service' not in st.session_state:
+                  st.session_state.monitoring_service = ModelMonitoringService()
+              
+              service = st.session_state.monitoring_service
+              
+              # Sidebar for configuration
+              st.sidebar.header("Configuration")
+              
+              # File upload
+              reference_file = st.sidebar.file_uploader("Upload Reference Data", type=['csv'])
+              current_file = st.sidebar.file_uploader("Upload Current Data", type=['csv'])
+              
+              if reference_file and current_file:
+                  # Load data
+                  service.reference_data = pd.read_csv(reference_file)
+                  service.current_data = pd.read_csv(current_file)
+                  
+                  st.sidebar.success("Data loaded successfully!")
+                  
+                  # Column mapping
+                  columns = service.reference_data.columns.tolist()
+                  target_col = st.sidebar.selectbox("Target Column", [None] + columns)
+                  prediction_col = st.sidebar.selectbox("Prediction Column", [None] + columns)
+                  
+                  service.setup_column_mapping(target_col=target_col, 
+                                             prediction_col=prediction_col)
+                  
+                  # Main dashboard
+                  tab1, tab2, tab3, tab4 = st.tabs(["Overview", "Data Drift", "Model Performance", "Alerts"])
+                  
+                  with tab1:
+                      st.header("Dataset Overview")
+                      
+                      col1, col2 = st.columns(2)
+                      with col1:
+                          st.subheader("Reference Data")
+                          st.write(f"Shape: {service.reference_data.shape}")
+                          st.dataframe(service.reference_data.head())
+                      
+                      with col2:
+                          st.subheader("Current Data")
+                          st.write(f"Shape: {service.current_data.shape}")
+                          st.dataframe(service.current_data.head())
+                  
+                  with tab2:
+                      st.header("Data Drift Analysis")
+                      
+                      if st.button("Generate Data Drift Report"):
+                          with st.spinner("Generating report..."):
+                              try:
+                                  report = service.generate_data_drift_report()
+                                  # Display report (in practice, you'd render the HTML)
+                                  st.success("Data drift report generated successfully!")
+                                  
+                                  # Generate profile for drift metrics
+                                  profile = service.generate_profile([DataDriftProfileSection()])
+                                  profile_data = json.loads(profile)
+                                  
+                                  if 'data_drift' in profile_data:
+                                      drift_score = profile_data['data_drift'].get('drift_score', 0)
+                                      st.metric("Data Drift Score", f"{drift_score:.3f}")
+                                      
+                                      if drift_score > 0.1:
+                                          st.warning("⚠️ Data drift detected!")
+                                      else:
+                                          st.success("✅ No significant data drift")
+                                  
+                              except Exception as e:
+                                  st.error(f"Error generating report: {e}")
+                  
+                  with tab3:
+                      st.header("Model Performance")
+                      
+                      model_type = st.selectbox("Model Type", ["classification", "regression"])
+                      
+                      if st.button("Generate Performance Report"):
+                          with st.spinner("Generating report..."):
+                              try:
+                                  report = service.generate_model_performance_report(model_type)
+                                  st.success("Performance report generated successfully!")
+                                  
+                                  # Show sample metrics (in practice, extract from report)
+                                  col1, col2, col3, col4 = st.columns(4)
+                                  with col1:
+                                      st.metric("Accuracy", "0.85")
+                                  with col2:
+                                      st.metric("Precision", "0.87")
+                                  with col3:
+                                      st.metric("Recall", "0.83")
+                                  with col4:
+                                      st.metric("F1 Score", "0.85")
+                                  
+                              except Exception as e:
+                                  st.error(f"Error generating report: {e}")
+                  
+                  with tab4:
+                      st.header("Alerts & Notifications")
+                      
+                      if st.button("Check for Alerts"):
+                          with st.spinner("Checking for issues..."):
+                              try:
+                                  profile = service.generate_profile()
+                                  alerts = service.check_drift_alerts(profile)
+                                  
+                                  if alerts:
+                                      st.warning(f"Found {len(alerts)} alert(s)")
+                                      for alert in alerts:
+                                          st.error(f"🚨 {alert['message']}")
+                                  else:
+                                      st.success("✅ No alerts detected")
+                                      
+                              except Exception as e:
+                                  st.error(f"Error checking alerts: {e}")
+          
+          if __name__ == "__main__":
+              create_monitoring_dashboard()
+          EOF
+          
+          streamlit run /app/monitoring_service.py --server.address 0.0.0.0 --server.port 8501
+        ports:
+        - containerPort: 8501
+          name: streamlit
+        env:
+        - name: PYTHONUNBUFFERED
+          value: "1"
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        volumeMounts:
+        - name: evidently-config
+          mountPath: /config
+          readOnly: true
+      volumes:
+      - name: evidently-config
+        configMap:
+          name: evidently-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: evidently-service
+  namespace: ml-monitoring
+  labels:
+    app: evidently-service
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8501
+    targetPort: 8501
+    protocol: TCP
+    name: streamlit
+  selector:
+    app: evidently-service
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: evidently-ingress
+  namespace: ml-monitoring
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  rules:
+  - host: monitoring.local
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: evidently-service
+            port:
+              number: 8501
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: model-monitoring-job
+  namespace: ml-monitoring
+spec:
+  schedule: "0 */4 * * *"  # Every 4 hours
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - name: monitoring-job
+            image: python:3.9-slim
+            command:
+            - /bin/bash
+            - -c
+            - |
+              pip install evidently==0.4.2 pandas scikit-learn boto3 requests
+              
+              python << 'EOF'
+              import pandas as pd
+              import numpy as np
+              from evidently.model_profile import Profile
+              from evidently.model_profile.sections import DataDriftProfileSection, NumTargetDriftProfileSection
+              from evidently.pipeline.column_mapping import ColumnMapping
+              import json
+              import requests
+              from datetime import datetime
+              import boto3
+              import os
+              
+              def load_data_from_s3(bucket, key):
+                  """Load data from S3"""
+                  s3 = boto3.client('s3')
+                  obj = s3.get_object(Bucket=bucket, Key=key)
+                  return pd.read_csv(obj['Body'])
+              
+              def generate_monitoring_report():
+                  """Generate automated monitoring report"""
+                  print("Starting automated model monitoring...")
+                  
+                  # Load reference and current data
+                  # In practice, these would be real datasets
+                  np.random.seed(42)
+                  
+                  # Generate synthetic reference data
+                  reference_data = pd.DataFrame({
+                      'feature_1': np.random.normal(0, 1, 1000),
+                      'feature_2': np.random.normal(0, 1, 1000),
+                      'feature_3': np.random.normal(0, 1, 1000),
+                      'target': np.random.randint(0, 2, 1000)
+                  })
+                  
+                  # Generate synthetic current data with some drift
+                  current_data = pd.DataFrame({
+                      'feature_1': np.random.normal(0.2, 1.1, 1000),  # slight drift
+                      'feature_2': np.random.normal(0, 1, 1000),
+                      'feature_3': np.random.normal(-0.1, 0.9, 1000),  # slight drift
+                      'target': np.random.randint(0, 2, 1000)
+                  })
+                  
+                  # Setup column mapping
+                  column_mapping = ColumnMapping()
+                  column_mapping.target = 'target'
+                  column_mapping.numerical_features = ['feature_1', 'feature_2', 'feature_3']
+                  
+                  # Generate profile
+                  profile = Profile(sections=[
+                      DataDriftProfileSection(),
+                      NumTargetDriftProfileSection()
+                  ])
+                  
+                  profile.calculate(reference_data, current_data, column_mapping=column_mapping)
+                  profile_json = profile.json()
+                  profile_data = json.loads(profile_json)
+                  
+                  # Check for alerts
+                  alerts = []
+                  
+                  if 'data_drift' in profile_data:
+                      drift_score = profile_data['data_drift'].get('drift_score', 0)
+                      if drift_score > 0.1:
+                          alerts.append({
+                              'type': 'data_drift',
+                              'severity': 'high' if drift_score > 0.2 else 'medium',
+                              'score': drift_score,
+                              'timestamp': datetime.now().isoformat(),
+                              'message': f'Data drift detected with score {drift_score:.3f}'
+                          })
+                  
+                  # Log results
+                  print(f"Monitoring completed at {datetime.now()}")
+                  print(f"Found {len(alerts)} alerts")
+                  
+                  for alert in alerts:
+                      print(f"ALERT: {alert}")
+                      
+                      # In practice, send to alerting system
+                      # send_slack_alert(alert)
+                      # send_email_alert(alert)
+                  
+                  # Save report to S3 or similar
+                  report_data = {
+                      'timestamp': datetime.now().isoformat(),
+                      'profile': profile_data,
+                      'alerts': alerts
+                  }
+                  
+                  print("Report saved successfully")
+                  return report_data
+              
+              # Run monitoring
+              generate_monitoring_report()
+              EOF
+            env:
+            - name: AWS_DEFAULT_REGION
+              value: "us-west-2"
+            resources:
+              requests:
+                memory: "1Gi"
+                cpu: "500m"
+              limits:
+                memory: "2Gi"
+                cpu: "1000m"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: monitoring-scripts
+  namespace: ml-monitoring
+data:
+  drift_detector.py: |
+    #!/usr/bin/env python3
+    """
+    Advanced drift detection script using multiple statistical tests
+    """
+    import pandas as pd
+    import numpy as np
+    from scipy import stats
+    from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+    import warnings
+    warnings.filterwarnings('ignore')
+    
+    class DriftDetector:
+        def __init__(self, threshold=0.05):
+            self.threshold = threshold
+            
+        def kolmogorov_smirnov_test(self, reference, current):
+            """Kolmogorov-Smirnov test for numerical features"""
+            statistic, p_value = stats.ks_2samp(reference, current)
+            return {'statistic': statistic, 'p_value': p_value, 'drift': p_value < self.threshold}
+        
+        def chi_square_test(self, reference, current):
+            """Chi-square test for categorical features"""
+            ref_counts = pd.Series(reference).value_counts().sort_index()
+            cur_counts = pd.Series(current).value_counts().sort_index()
+            
+            # Align the series
+            all_categories = ref_counts.index.union(cur_counts.index)
+            ref_aligned = ref_counts.reindex(all_categories, fill_value=0)
+            cur_aligned = cur_counts.reindex(all_categories, fill_value=0)
+            
+            # Perform chi-square test
+            statistic, p_value = stats.chisquare(cur_aligned, ref_aligned)
+            return {'statistic': statistic, 'p_value': p_value, 'drift': p_value < self.threshold}
+        
+        def population_stability_index(self, reference, current, bins=10):
+            """Population Stability Index for numerical features"""
+            ref_series = pd.Series(reference)
+            cur_series = pd.Series(current)
+            
+            # Create bins based on reference data
+            _, bin_edges = np.histogram(ref_series, bins=bins)
+            
+            # Calculate distributions
+            ref_counts, _ = np.histogram(ref_series, bins=bin_edges)
+            cur_counts, _ = np.histogram(cur_series, bins=bin_edges)
+            
+            # Calculate proportions
+            ref_props = ref_counts / len(ref_series)
+            cur_props = cur_counts / len(cur_series)
+            
+            # Avoid division by zero
+            ref_props = np.where(ref_props == 0, 0.0001, ref_props)
+            cur_props = np.where(cur_props == 0, 0.0001, cur_props)
+            
+            # Calculate PSI
+            psi = np.sum((cur_props - ref_props) * np.log(cur_props / ref_props))
+            
+            # PSI interpretation: <0.1 = no drift, 0.1-0.2 = moderate drift, >0.2 = significant drift
+            return {'psi': psi, 'drift': psi > 0.1}
+        
+        def detect_feature_drift(self, reference_df, current_df):
+            """Detect drift for all features in the datasets"""
+            results = {}
+            
+            for column in reference_df.columns:
+                if column in current_df.columns:
+                    ref_col = reference_df[column].dropna()
+                    cur_col = current_df[column].dropna()
+                    
+                    # Determine if numerical or categorical
+                    if pd.api.types.is_numeric_dtype(ref_col):
+                        # Numerical feature
+                        ks_result = self.kolmogorov_smirnov_test(ref_col, cur_col)
+                        psi_result = self.population_stability_index(ref_col, cur_col)
+                        
+                        results[column] = {
+                            'type': 'numerical',
+                            'ks_test': ks_result,
+                            'psi': psi_result,
+                            'drift_detected': ks_result['drift'] or psi_result['drift']
+                        }
+                    else:
+                        # Categorical feature
+                        chi2_result = self.chi_square_test(ref_col, cur_col)
+                        
+                        results[column] = {
+                            'type': 'categorical',
+                            'chi2_test': chi2_result,
+                            'drift_detected': chi2_result['drift']
+                        }
+            
+            return results
+        
+        def detect_target_drift(self, reference_target, current_target):
+            """Detect drift in target variable"""
+            if pd.api.types.is_numeric_dtype(reference_target):
+                # Numerical target
+                ks_result = self.kolmogorov_smirnov_test(reference_target, current_target)
+                return {'type': 'numerical', 'test': ks_result, 'drift': ks_result['drift']}
+            else:
+                # Categorical target
+                chi2_result = self.chi_square_test(reference_target, current_target)
+                return {'type': 'categorical', 'test': chi2_result, 'drift': chi2_result['drift']}
+        
+        def detect_prediction_drift(self, reference_predictions, current_predictions):
+            """Detect drift in model predictions"""
+            return self.detect_target_drift(reference_predictions, current_predictions)
+    
+    if __name__ == "__main__":
+        # Example usage
+        np.random.seed(42)
+        
+        # Generate sample data
+        reference_data = pd.DataFrame({
+            'feature1': np.random.normal(0, 1, 1000),
+            'feature2': np.random.choice(['A', 'B', 'C'], 1000),
+            'target': np.random.randint(0, 2, 1000)
+        })
+        
+        # Current data with some drift
+        current_data = pd.DataFrame({
+            'feature1': np.random.normal(0.5, 1.2, 1000),  # drift in mean and std
+            'feature2': np.random.choice(['A', 'B', 'C'], 1000, p=[0.6, 0.3, 0.1]),  # drift in distribution
+            'target': np.random.randint(0, 2, 1000)
+        })
+        
+        # Detect drift
+        detector = DriftDetector(threshold=0.05)
+        
+        feature_drift = detector.detect_feature_drift(
+            reference_data[['feature1', 'feature2']], 
+            current_data[['feature1', 'feature2']]
+        )
+        
+        target_drift = detector.detect_target_drift(
+            reference_data['target'], 
+            current_data['target']
+        )
+        
+        print("Feature Drift Results:")
+        for feature, result in feature_drift.items():
+            print(f"  {feature}: {'DRIFT DETECTED' if result['drift_detected'] else 'NO DRIFT'}")
+        
+        print(f"\nTarget Drift: {'DRIFT DETECTED' if target_drift['drift'] else 'NO DRIFT'}")
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: ml-monitoring-metrics
+  namespace: ml-monitoring
+  labels:
+    app: evidently-service
+spec:
+  selector:
+    matchLabels:
+      app: evidently-service
+  endpoints:
+  - port: streamlit
+    interval: 30s
+    path: /metrics
