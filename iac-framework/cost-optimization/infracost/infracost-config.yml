@@ -1,0 +1,408 @@
+# Infracost Configuration
+# This file configures cost estimation and optimization settings
+
+version: 0.1
+
+# =============================================================================
+# Project Configuration
+# =============================================================================
+projects:
+  # Development environment
+  - path: examples/environments/dev
+    name: development
+    terraform_plan_flags: -var-file=terraform.tfvars
+    terraform_workspace: dev
+    usage_file: usage-dev.yml
+    
+  # Staging environment  
+  - path: examples/environments/staging
+    name: staging
+    terraform_plan_flags: -var-file=terraform.tfvars
+    terraform_workspace: staging
+    usage_file: usage-staging.yml
+    
+  # Production environment
+  - path: examples/environments/prod
+    name: production
+    terraform_plan_flags: -var-file=terraform.tfvars
+    terraform_workspace: prod
+    usage_file: usage-prod.yml
+
+# =============================================================================
+# Cost Policies
+# =============================================================================
+cost_policies:
+  # Development environment limits
+  - name: dev_monthly_limit
+    description: "Development environment should not exceed $500/month"
+    project: development
+    threshold:
+      monthly: 500
+      currency: USD
+    action: warn
+    
+  # Staging environment limits
+  - name: staging_monthly_limit
+    description: "Staging environment should not exceed $1000/month"
+    project: staging
+    threshold:
+      monthly: 1000
+      currency: USD
+    action: warn
+    
+  # Production environment monitoring
+  - name: prod_monthly_monitor
+    description: "Monitor production costs closely"
+    project: production
+    threshold:
+      monthly: 5000
+      currency: USD
+    action: notify
+    
+  # Instance type restrictions
+  - name: expensive_instances
+    description: "Flag expensive instance types"
+    resource_types:
+      - aws_instance
+    filters:
+      instance_type:
+        - "*.8xlarge"
+        - "*.12xlarge"
+        - "*.16xlarge"
+        - "*.24xlarge"
+    action: warn
+    message: "Consider using smaller instance types or reserved instances"
+
+# =============================================================================
+# Currency and Pricing
+# =============================================================================
+currency: USD
+pricing_api_endpoint: https://pricing.us-east-1.amazonaws.com
+
+# Use specific pricing regions
+pricing:
+  aws:
+    region: us-west-2
+    
+# =============================================================================
+# Breakdown Configuration
+# =============================================================================
+breakdown:
+  # Group costs by these fields
+  group_by:
+    - resource_type
+    - location
+    - tag:Environment
+    - tag:Project
+    
+  # Show costs for these time periods
+  time_periods:
+    - monthly
+    - yearly
+    
+  # Include these cost components
+  include_components:
+    - compute
+    - storage
+    - network
+    - database
+    - other
+    
+  # Exclude these resources from cost calculation
+  exclude_resources:
+    - aws_cloudwatch_log_group
+    - aws_iam_role
+    - aws_iam_policy
+    - data.*
+
+# =============================================================================
+# Output Configuration
+# =============================================================================
+output:
+  # Default output format
+  format: table
+  
+  # Show usage-based resources
+  show_usage: true
+  
+  # Show skipped resources
+  show_skipped: false
+  
+  # Include HTML output
+  html:
+    enabled: true
+    template: custom-template.html
+    
+  # Include JSON output for automation
+  json:
+    enabled: true
+    file: cost-estimate.json
+    
+  # Slack integration
+  slack:
+    enabled: false
+    webhook_url: ${SLACK_WEBHOOK_URL}
+    template: |
+      💰 **Cost Estimate Update**
+      
+      **Project**: {{.Project}}
+      **Monthly Cost**: ${{.MonthlyCost}}
+      **Change**: {{if gt .Diff 0}}+${{.Diff}} ⬆️{{else if lt .Diff 0}}-${{abs .Diff}} ⬇️{{else}}No change{{end}}
+      
+      View details: {{.DashboardURL}}
+
+# =============================================================================
+# CI/CD Integration
+# =============================================================================
+ci_cd:
+  # GitHub Actions integration
+  github_actions:
+    enabled: true
+    comment_on_pull_request: true
+    update_existing_comment: true
+    
+    # Comment template
+    comment_template: |
+      ## 💰 Cost Estimate
+      
+      | Project | Previous | Current | Diff |
+      |---------|----------|---------|------|
+      {{- range .Projects }}
+      | {{.Name}} | ${{.Previous}} | ${{.Current}} | {{if gt .Diff 0}}+${{.Diff}} ⬆️{{else if lt .Diff 0}}-${{abs .Diff}} ⬇️{{else}}$0{{end}} |
+      {{- end }}
+      
+      **Total Monthly**: ${{.TotalCurrent}}
+      **Monthly Change**: {{if gt .TotalDiff 0}}+${{.TotalDiff}} ⬆️{{else if lt .TotalDiff 0}}-${{abs .TotalDiff}} ⬇️{{else}}No change{{end}}
+      
+      <details>
+      <summary>📊 View detailed breakdown</summary>
+      
+      ```
+      {{.DetailedBreakdown}}
+      ```
+      </details>
+      
+      ---
+      *This estimate was generated by [Infracost](https://infracost.io). It shows the cost difference between the current and planned infrastructure.*
+  
+  # GitLab CI integration
+  gitlab_ci:
+    enabled: false
+    merge_request_note: true
+    
+  # Atlantis integration
+  atlantis:
+    enabled: true
+    
+# =============================================================================
+# Dashboard Configuration
+# =============================================================================
+dashboard:
+  enabled: true
+  url: https://dashboard.infracost.io
+  
+  # Dashboard settings
+  settings:
+    # Show trends over time
+    show_trends: true
+    
+    # Group by these dimensions
+    group_by:
+      - project
+      - environment
+      - resource_type
+      
+    # Cost alerts
+    alerts:
+      - name: monthly_budget_exceeded
+        threshold: 1000
+        comparison: greater_than
+        notification:
+          email: devops@company.com
+          slack: "#infrastructure-alerts"
+      
+      - name: cost_increase_significant
+        threshold: 20
+        comparison: percentage_increase
+        period: weekly
+        notification:
+          email: devops@company.com
+
+# =============================================================================
+# Tagging Strategy
+# =============================================================================
+tagging:
+  # Required tags for cost allocation
+  required_tags:
+    - Environment
+    - Project
+    - Owner
+    - CostCenter
+    
+  # Default values if tags are missing
+  default_values:
+    Owner: "unknown"
+    CostCenter: "general"
+    
+  # Tag-based cost allocation rules
+  cost_allocation:
+    # Allocate shared resources based on usage
+    shared_resources:
+      - aws_nat_gateway
+      - aws_internet_gateway
+      - aws_vpc
+    
+    allocation_method: proportional_by_compute
+
+# =============================================================================
+# Usage-Based Pricing
+# =============================================================================
+usage:
+  # EC2 instance usage patterns
+  ec2:
+    # Default operating hours per month
+    default_hours: 730  # 24/7 operation
+    
+    # Environment-specific usage patterns
+    environments:
+      dev:
+        hours: 160  # 8 hours/day, 5 days/week
+        cpu_utilization: 20
+      staging:
+        hours: 320  # 16 hours/day, 5 days/week  
+        cpu_utilization: 40
+      prod:
+        hours: 730  # 24/7
+        cpu_utilization: 70
+        
+  # RDS usage patterns
+  rds:
+    environments:
+      dev:
+        hours: 160
+        storage_utilization: 30
+      staging:
+        hours: 320
+        storage_utilization: 50
+      prod:
+        hours: 730
+        storage_utilization: 80
+        
+  # S3 usage patterns
+  s3:
+    # Monthly storage and request patterns
+    storage_gb: 1000
+    requests:
+      get: 1000000
+      put: 100000
+      
+# =============================================================================
+# Optimization Recommendations
+# =============================================================================
+optimization:
+  enabled: true
+  
+  # Automated recommendations
+  recommendations:
+    # Right-sizing recommendations
+    right_sizing:
+      enabled: true
+      cpu_utilization_threshold: 80
+      memory_utilization_threshold: 80
+      
+    # Reserved instance recommendations
+    reserved_instances:
+      enabled: true
+      utilization_threshold: 70
+      term: 1_year
+      payment_option: partial_upfront
+      
+    # Storage optimization
+    storage:
+      enabled: true
+      unused_volume_threshold: 30  # days
+      low_utilization_threshold: 10  # percent
+      
+    # Networking optimization
+    networking:
+      enabled: true
+      cross_az_traffic_threshold: 1000  # GB/month
+      
+  # Cost optimization targets
+  targets:
+    monthly_savings: 500  # Target $500/month savings
+    efficiency_ratio: 0.8  # Target 80% resource utilization
+
+# =============================================================================
+# Integration with Other Tools
+# =============================================================================
+integrations:
+  # AWS Cost Explorer
+  aws_cost_explorer:
+    enabled: true
+    sync_tags: true
+    
+  # CloudWatch
+  cloudwatch:
+    enabled: true
+    metrics:
+      - CPUUtilization
+      - NetworkIn
+      - NetworkOut
+      
+  # Terraform Cloud
+  terraform_cloud:
+    enabled: false
+    organization: ${TF_CLOUD_ORGANIZATION}
+    
+  # Datadog
+  datadog:
+    enabled: false
+    api_key: ${DATADOG_API_KEY}
+    
+# =============================================================================
+# Compliance and Governance
+# =============================================================================
+governance:
+  # Budget controls
+  budgets:
+    - name: monthly_dev_budget
+      amount: 500
+      environment: dev
+      alerts:
+        - threshold: 80
+          type: percentage
+        - threshold: 100
+          type: percentage
+          
+    - name: monthly_prod_budget
+      amount: 5000
+      environment: prod
+      alerts:
+        - threshold: 75
+          type: percentage
+        - threshold: 90
+          type: percentage
+        - threshold: 100
+          type: percentage
+  
+  # Cost center allocation
+  cost_centers:
+    - name: engineering
+      budget: 3000
+      projects: [dev, staging]
+      
+    - name: production
+      budget: 8000
+      projects: [prod]
+      
+  # Approval workflows
+  approvals:
+    # Require approval for costs above threshold
+    - threshold: 1000
+      monthly: true
+      approvers: [manager@company.com]
+      
+    - threshold: 5000
+      monthly: true
+      approvers: [cto@company.com, finance@company.com]

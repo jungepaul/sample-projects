@@ -1,0 +1,583 @@
+# AWS Cost Optimization Policies using Cloud Custodian
+# These policies help identify and remediate cost optimization opportunities
+
+policies:
+
+# =============================================================================
+# EC2 Cost Optimization Policies
+# =============================================================================
+
+# Stop development instances outside business hours
+- name: ec2-dev-stop-after-hours
+  description: Stop development EC2 instances outside business hours (6 PM - 8 AM, weekends)
+  resource: ec2
+  filters:
+    - "tag:Environment": "dev"
+    - type: value
+      key: State.Name
+      value: running
+    - type: offhour
+      # Business hours: 8 AM - 6 PM PST, Monday-Friday
+      tag: schedule
+      default_tz: America/Los_Angeles
+      offhour: 18
+      onhour: 8
+      weekends: true
+  actions:
+    - type: stop
+      tag: custodian_stopped
+    - type: notify
+      template: default.html
+      priority_header: "2"
+      subject: "EC2 Dev Instance Stopped - Cost Optimization"
+      to:
+        - devops@company.com
+      transport:
+        type: sqs
+        queue: custodian-notifications
+
+# Start development instances during business hours
+- name: ec2-dev-start-business-hours
+  description: Start development EC2 instances during business hours
+  resource: ec2
+  filters:
+    - "tag:Environment": "dev"
+    - "tag:custodian_stopped": present
+    - type: value
+      key: State.Name
+      value: stopped
+    - type: onhour
+      tag: schedule
+      default_tz: America/Los_Angeles
+      onhour: 8
+      weekends: false
+  actions:
+    - type: start
+    - type: unmark
+      tags: [custodian_stopped]
+
+# Terminate untagged instances after warning
+- name: ec2-terminate-untagged
+  description: Terminate EC2 instances without required tags after 7 days warning
+  resource: ec2
+  filters:
+    - "tag:Environment": absent
+    - "tag:Project": absent
+    - "tag:Owner": absent
+    - type: marked-for-op
+      tag: custodian_cleanup
+      op: terminate
+      skew: 7
+  actions:
+    - type: terminate
+    - type: notify
+      template: default.html
+      priority_header: "1"
+      subject: "EC2 Instance Terminated - Missing Required Tags"
+      to:
+        - devops@company.com
+      transport:
+        type: sqs
+        queue: custodian-notifications
+
+# Mark untagged instances for termination
+- name: ec2-mark-untagged-for-termination
+  description: Mark untagged EC2 instances for termination in 7 days
+  resource: ec2
+  filters:
+    - "tag:Environment": absent
+    - "tag:Project": absent  
+    - "tag:Owner": absent
+    - type: value
+      key: State.Name
+      value: running
+  actions:
+    - type: mark-for-op
+      tag: custodian_cleanup
+      op: terminate
+      days: 7
+    - type: notify
+      template: default.html
+      priority_header: "2"
+      subject: "EC2 Instance Marked for Termination - Missing Tags"
+      to:
+        - devops@company.com
+      transport:
+        type: sqs
+        queue: custodian-notifications
+
+# Identify underutilized instances
+- name: ec2-underutilized-instances
+  description: Identify EC2 instances with low CPU utilization
+  resource: ec2
+  filters:
+    - type: value
+      key: State.Name
+      value: running
+    - type: metrics
+      name: CPUUtilization
+      days: 7
+      period: 86400  # 1 day
+      value: 10
+      op: less-than
+      statistics: Average
+  actions:
+    - type: notify
+      template: default.html
+      priority_header: "3"
+      subject: "Underutilized EC2 Instances Found"
+      to:
+        - devops@company.com
+      transport:
+        type: sqs
+        queue: custodian-notifications
+
+# Recommend instance right-sizing
+- name: ec2-oversized-instances
+  description: Identify oversized EC2 instances for right-sizing
+  resource: ec2
+  filters:
+    - type: value
+      key: InstanceType
+      op: in
+      value: 
+        - m5.4xlarge
+        - m5.8xlarge
+        - m5.12xlarge
+        - c5.4xlarge
+        - c5.9xlarge
+        - c5.18xlarge
+    - type: metrics
+      name: CPUUtilization
+      days: 14
+      period: 86400
+      value: 50
+      op: less-than
+      statistics: Average
+  actions:
+    - type: notify
+      template: default.html
+      priority_header: "2"
+      subject: "EC2 Right-Sizing Opportunity"
+      to:
+        - devops@company.com
+        - finance@company.com
+      transport:
+        type: sqs
+        queue: custodian-notifications
+
+# =============================================================================
+# EBS Volume Cost Optimization
+# =============================================================================
+
+# Delete unattached EBS volumes after warning
+- name: ebs-delete-unattached
+  description: Delete unattached EBS volumes older than 30 days
+  resource: ebs
+  filters:
+    - type: value
+      key: State
+      value: available
+    - type: age
+      days: 30
+      op: greater-than
+  actions:
+    - type: delete
+    - type: notify
+      template: default.html
+      priority_header: "2"
+      subject: "Unattached EBS Volume Deleted"
+      to:
+        - devops@company.com
+      transport:
+        type: sqs
+        queue: custodian-notifications
+
+# Mark expensive unattached volumes for deletion
+- name: ebs-mark-expensive-unattached
+  description: Mark expensive unattached EBS volumes for deletion
+  resource: ebs
+  filters:
+    - type: value
+      key: State
+      value: available
+    - type: value
+      key: Size
+      value: 100
+      op: greater-than
+  actions:
+    - type: mark-for-op
+      tag: custodian_cleanup
+      op: delete
+      days: 7
+    - type: notify
+      template: default.html
+      priority_header: "2"
+      subject: "Expensive Unattached EBS Volume Marked for Deletion"
+      to:
+        - devops@company.com
+      transport:
+        type: sqs
+        queue: custodian-notifications
+
+# Identify volumes for gp3 migration
+- name: ebs-gp2-to-gp3-migration
+  description: Identify gp2 volumes that should be migrated to gp3
+  resource: ebs
+  filters:
+    - type: value
+      key: VolumeType
+      value: gp2
+    - type: value
+      key: Size
+      value: 100
+      op: greater-than
+  actions:
+    - type: notify
+      template: default.html
+      priority_header: "3"
+      subject: "EBS gp2 to gp3 Migration Opportunity"
+      to:
+        - devops@company.com
+      transport:
+        type: sqs
+        queue: custodian-notifications
+
+# =============================================================================
+# RDS Cost Optimization
+# =============================================================================
+
+# Stop non-production RDS instances after hours
+- name: rds-dev-stop-after-hours
+  description: Stop development RDS instances outside business hours
+  resource: rds
+  filters:
+    - "tag:Environment": "dev"
+    - type: value
+      key: DBInstanceStatus
+      value: available
+    - type: offhour
+      tag: schedule
+      default_tz: America/Los_Angeles
+      offhour: 18
+      onhour: 8
+      weekends: true
+  actions:
+    - type: stop
+    - type: notify
+      template: default.html
+      priority_header: "2"
+      subject: "RDS Dev Instance Stopped - Cost Optimization"
+      to:
+        - devops@company.com
+      transport:
+        type: sqs
+        queue: custodian-notifications
+
+# Identify underutilized RDS instances
+- name: rds-underutilized
+  description: Identify RDS instances with low CPU utilization
+  resource: rds
+  filters:
+    - type: value
+      key: DBInstanceStatus
+      value: available
+    - type: metrics
+      name: CPUUtilization
+      days: 7
+      period: 86400
+      value: 20
+      op: less-than
+      statistics: Average
+  actions:
+    - type: notify
+      template: default.html
+      priority_header: "3"
+      subject: "Underutilized RDS Instance Found"
+      to:
+        - devops@company.com
+        - finance@company.com
+      transport:
+        type: sqs
+        queue: custodian-notifications
+
+# =============================================================================
+# S3 Cost Optimization
+# =============================================================================
+
+# Lifecycle old S3 objects to IA storage
+- name: s3-lifecycle-to-ia
+  description: Configure lifecycle policy for S3 buckets to move objects to IA
+  resource: s3
+  filters:
+    - type: bucket-lifecycle-rule
+      state: absent
+  actions:
+    - type: configure-lifecycle
+      rules:
+        - id: "transition-to-ia"
+          status: Enabled
+          filter:
+            prefix: ""
+          transition:
+            days: 30
+            storage_class: STANDARD_IA
+        - id: "transition-to-glacier"
+          status: Enabled
+          filter:
+            prefix: ""
+          transition:
+            days: 90
+            storage_class: GLACIER
+        - id: "expire-old-objects"
+          status: Enabled
+          filter:
+            prefix: "logs/"
+          expiration:
+            days: 365
+
+# Delete incomplete multipart uploads
+- name: s3-delete-incomplete-multipart
+  description: Delete incomplete multipart uploads older than 7 days
+  resource: s3
+  actions:
+    - type: delete-keys
+      prefix: ""
+      versions: true
+      delete-incomplete-multipart-uploads: 7
+
+# =============================================================================
+# Load Balancer Cost Optimization
+# =============================================================================
+
+# Identify unused Classic Load Balancers
+- name: elb-unused-classic
+  description: Identify Classic Load Balancers with no healthy instances
+  resource: elb
+  filters:
+    - type: healthcheck-healthy-count
+      count: 0
+  actions:
+    - type: notify
+      template: default.html
+      priority_header: "3"
+      subject: "Unused Classic Load Balancer Found"
+      to:
+        - devops@company.com
+      transport:
+        type: sqs
+        queue: custodian-notifications
+
+# Identify unused Application Load Balancers
+- name: elbv2-unused-alb
+  description: Identify ALBs with no targets
+  resource: app-elb
+  filters:
+    - type: target-group
+      key: target-health
+      value: empty
+  actions:
+    - type: notify
+      template: default.html
+      priority_header: "3"
+      subject: "Unused Application Load Balancer Found"
+      to:
+        - devops@company.com
+      transport:
+        type: sqs
+        queue: custodian-notifications
+
+# =============================================================================
+# Elastic IP Cost Optimization
+# =============================================================================
+
+# Release unassociated Elastic IPs
+- name: ec2-release-unassociated-eips
+  description: Release Elastic IPs not associated with running instances
+  resource: elastic-ip
+  filters:
+    - type: value
+      key: InstanceId
+      value: absent
+  actions:
+    - type: release
+    - type: notify
+      template: default.html
+      priority_header: "2"
+      subject: "Unassociated Elastic IP Released"
+      to:
+        - devops@company.com
+      transport:
+        type: sqs
+        queue: custodian-notifications
+
+# =============================================================================
+# NAT Gateway Cost Optimization
+# =============================================================================
+
+# Identify underutilized NAT Gateways
+- name: nat-gateway-underutilized
+  description: Identify underutilized NAT Gateways
+  resource: nat-gateway
+  filters:
+    - type: value
+      key: State
+      value: available
+    - type: metrics
+      name: BytesOutToDestination
+      days: 7
+      period: 86400
+      value: 1000000000  # 1GB per day
+      op: less-than
+      statistics: Sum
+  actions:
+    - type: notify
+      template: default.html
+      priority_header: "3"
+      subject: "Underutilized NAT Gateway Found"
+      to:
+        - devops@company.com
+        - finance@company.com
+      transport:
+        type: sqs
+        queue: custodian-notifications
+
+# =============================================================================
+# CloudWatch Logs Cost Optimization
+# =============================================================================
+
+# Set retention policy for CloudWatch Logs
+- name: cloudwatch-logs-set-retention
+  description: Set retention policy for CloudWatch Log Groups
+  resource: log-group
+  filters:
+    - type: value
+      key: retentionInDays
+      value: absent
+  actions:
+    - type: retention
+      days: 30
+    - type: notify
+      template: default.html
+      priority_header: "3"
+      subject: "CloudWatch Logs Retention Policy Set"
+      to:
+        - devops@company.com
+      transport:
+        type: sqs
+        queue: custodian-notifications
+
+# =============================================================================
+# Lambda Cost Optimization
+# =============================================================================
+
+# Identify over-provisioned Lambda functions
+- name: lambda-over-provisioned
+  description: Identify Lambda functions with excessive memory allocation
+  resource: lambda
+  filters:
+    - type: metrics
+      name: Duration
+      days: 7
+      period: 86400
+      value: 30000  # 30 seconds
+      op: less-than
+      statistics: Average
+    - type: value
+      key: MemorySize
+      value: 512
+      op: greater-than
+  actions:
+    - type: notify
+      template: default.html
+      priority_header: "3"
+      subject: "Over-provisioned Lambda Function Found"
+      to:
+        - devops@company.com
+      transport:
+        type: sqs
+        queue: custodian-notifications
+
+# =============================================================================
+# Reserved Instance Recommendations
+# =============================================================================
+
+# Identify EC2 instances suitable for Reserved Instances
+- name: ec2-ri-recommendations
+  description: Identify long-running EC2 instances suitable for Reserved Instances
+  resource: ec2
+  filters:
+    - type: value
+      key: State.Name
+      value: running
+    - type: instance-age
+      days: 30
+      op: greater-than
+    - "tag:Environment": 
+      - prod
+      - staging
+  actions:
+    - type: notify
+      template: default.html
+      priority_header: "3"
+      subject: "Reserved Instance Recommendation"
+      to:
+        - devops@company.com
+        - finance@company.com
+      transport:
+        type: sqs
+        queue: custodian-notifications
+
+# =============================================================================
+# Cost Anomaly Detection
+# =============================================================================
+
+# Monitor for cost spikes
+- name: cost-anomaly-detection
+  description: Detect unusual cost increases
+  resource: account
+  filters:
+    - type: cost-billing
+      dimension: Service
+      period: daily
+      value: 100
+      op: greater-than
+      unit: USD
+  actions:
+    - type: notify
+      template: default.html
+      priority_header: "1"
+      subject: "Cost Anomaly Detected"
+      to:
+        - devops@company.com
+        - finance@company.com
+        - cto@company.com
+      transport:
+        type: sqs
+        queue: custodian-notifications
+
+# =============================================================================
+# Compliance and Governance
+# =============================================================================
+
+# Enforce cost center tagging
+- name: enforce-cost-center-tagging
+  description: Ensure all resources have cost center tags
+  resource: aws.*
+  filters:
+    - "tag:CostCenter": absent
+    - type: value
+      key: "tag:Environment"
+      op: in
+      value: [prod, staging]
+  actions:
+    - type: notify
+      template: default.html
+      priority_header: "2"
+      subject: "Missing Cost Center Tag"
+      to:
+        - devops@company.com
+        - finance@company.com
+      transport:
+        type: sqs
+        queue: custodian-notifications

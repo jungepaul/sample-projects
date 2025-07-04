@@ -1,0 +1,310 @@
+# Kitchen-Terraform Configuration
+---
+driver:
+  name: terraform
+  root_module_directory: <%= File.join(Dir.pwd, "../../modules/aws") %>
+  variable_files:
+    - <%= File.join(Dir.pwd, "test/fixtures/terraform.tfvars") %>
+  command_timeout: 1800
+  color: true
+  verify_version: true
+  parallelism: 10
+
+provisioner:
+  name: terraform
+  
+verifier:
+  name: terraform
+  color: true
+  fail_fast: true
+  format: documentation
+  systems:
+    - name: aws
+      backend: aws_ssm
+      controls:
+        - operating_system
+        - inspec-aws
+        - custom_aws_controls
+
+platforms:
+  - name: aws
+    driver:
+      backend_configurations:
+        local:
+          name: local
+      variable_files:
+        - test/fixtures/terraform.tfvars
+    verifier:
+      systems:
+        - name: aws
+          backend: aws_ssm
+          sudo: true
+          reporter:
+            - cli
+            - html:test/reports/inspec-aws.html
+            - json:test/reports/inspec-aws.json
+
+transport:
+  name: ssh
+  ssh_key: <%= ENV['AWS_SSH_KEY_PATH'] || '~/.ssh/id_rsa' %>
+  connection_timeout: 10
+  connection_retries: 5
+  keepalive: true
+
+suites:
+  # VPC Module Tests
+  - name: vpc-basic
+    driver:
+      root_module_directory: <%= File.join(Dir.pwd, "../../modules/aws/vpc") %>
+      variable_files:
+        - test/fixtures/vpc/basic.tfvars
+    verifier:
+      systems:
+        - name: aws
+          backend: aws_ssm
+          controls:
+            - vpc_basic
+      inspec_tests:
+        - test/integration/vpc
+    attributes:
+      vpc_name: test-vpc-basic
+      environment: test
+
+  - name: vpc-advanced
+    driver:
+      root_module_directory: <%= File.join(Dir.pwd, "../../modules/aws/vpc") %>
+      variable_files:
+        - test/fixtures/vpc/advanced.tfvars
+    verifier:
+      systems:
+        - name: aws
+          backend: aws_ssm
+          controls:
+            - vpc_advanced
+      inspec_tests:
+        - test/integration/vpc
+    attributes:
+      vpc_name: test-vpc-advanced
+      environment: test
+
+  # EC2 Module Tests
+  - name: ec2-basic
+    driver:
+      root_module_directory: <%= File.join(Dir.pwd, "../../modules/aws/ec2") %>
+      variable_files:
+        - test/fixtures/ec2/basic.tfvars
+    verifier:
+      systems:
+        - name: aws
+          backend: aws_ssm
+          controls:
+            - ec2_basic
+      inspec_tests:
+        - test/integration/ec2
+    attributes:
+      instance_name: test-ec2-basic
+      environment: test
+
+  - name: ec2-advanced
+    driver:
+      root_module_directory: <%= File.join(Dir.pwd, "../../modules/aws/ec2") %>
+      variable_files:
+        - test/fixtures/ec2/advanced.tfvars
+    verifier:
+      systems:
+        - name: aws
+          backend: aws_ssm
+          controls:
+            - ec2_advanced
+      inspec_tests:
+        - test/integration/ec2
+    attributes:
+      instance_name: test-ec2-advanced
+      environment: test
+
+  # Security Group Tests
+  - name: security-groups
+    driver:
+      root_module_directory: <%= File.join(Dir.pwd, "../../modules/aws/ec2") %>
+      variable_files:
+        - test/fixtures/security_groups.tfvars
+    verifier:
+      systems:
+        - name: aws
+          backend: aws_ssm
+          controls:
+            - security_groups
+      inspec_tests:
+        - test/integration/security_groups
+    attributes:
+      environment: test
+
+  # IAM Role Tests
+  - name: iam-roles
+    driver:
+      root_module_directory: <%= File.join(Dir.pwd, "../../modules/aws/ec2") %>
+      variable_files:
+        - test/fixtures/iam_roles.tfvars
+    verifier:
+      systems:
+        - name: aws
+          backend: aws_ssm
+          controls:
+            - iam_roles
+      inspec_tests:
+        - test/integration/iam
+    attributes:
+      environment: test
+
+  # Multi-AZ Deployment Tests
+  - name: multi-az-deployment
+    driver:
+      root_module_directory: <%= File.join(Dir.pwd, "../../examples/multi-az") %>
+      variable_files:
+        - test/fixtures/multi_az.tfvars
+    verifier:
+      systems:
+        - name: aws
+          backend: aws_ssm
+          controls:
+            - multi_az_deployment
+      inspec_tests:
+        - test/integration/multi_az
+    attributes:
+      environment: test
+
+  # Production-like Environment Tests
+  - name: prod-like
+    driver:
+      root_module_directory: <%= File.join(Dir.pwd, "../../examples/production") %>
+      variable_files:
+        - test/fixtures/production.tfvars
+    verifier:
+      systems:
+        - name: aws
+          backend: aws_ssm
+          controls:
+            - production_environment
+      inspec_tests:
+        - test/integration/production
+    attributes:
+      environment: production
+      
+  # Cost Optimization Tests
+  - name: cost-optimization
+    driver:
+      root_module_directory: <%= File.join(Dir.pwd, "../../examples/cost-optimized") %>
+      variable_files:
+        - test/fixtures/cost_optimization.tfvars
+    verifier:
+      systems:
+        - name: aws
+          backend: aws_ssm
+          controls:
+            - cost_optimization
+      inspec_tests:
+        - test/integration/cost_optimization
+    attributes:
+      environment: test
+
+  # Security Compliance Tests
+  - name: security-compliance
+    driver:
+      root_module_directory: <%= File.join(Dir.pwd, "../../examples/security-hardened") %>
+      variable_files:
+        - test/fixtures/security_compliance.tfvars
+    verifier:
+      systems:
+        - name: aws
+          backend: aws_ssm
+          controls:
+            - security_compliance
+            - cis_benchmarks
+      inspec_tests:
+        - test/integration/security
+    attributes:
+      environment: test
+
+  # Performance Tests
+  - name: performance
+    driver:
+      root_module_directory: <%= File.join(Dir.pwd, "../../examples/high-performance") %>
+      variable_files:
+        - test/fixtures/performance.tfvars
+    verifier:
+      systems:
+        - name: aws
+          backend: aws_ssm
+          controls:
+            - performance_optimization
+      inspec_tests:
+        - test/integration/performance
+    attributes:
+      environment: test
+
+  # Disaster Recovery Tests
+  - name: disaster-recovery
+    driver:
+      root_module_directory: <%= File.join(Dir.pwd, "../../examples/disaster-recovery") %>
+      variable_files:
+        - test/fixtures/disaster_recovery.tfvars
+    verifier:
+      systems:
+        - name: aws
+          backend: aws_ssm
+          controls:
+            - disaster_recovery
+      inspec_tests:
+        - test/integration/disaster_recovery
+    attributes:
+      environment: test
+
+# Global configuration
+lifecycle:
+  pre_create:
+    - echo "Starting infrastructure deployment..."
+    - aws sts get-caller-identity
+  post_create:
+    - echo "Infrastructure deployment completed"
+    - sleep 30  # Allow time for resources to stabilize
+  pre_destroy:
+    - echo "Starting infrastructure cleanup..."
+  post_destroy:
+    - echo "Infrastructure cleanup completed"
+
+# Environment variables
+environment:
+  AWS_DEFAULT_REGION: <%= ENV['AWS_DEFAULT_REGION'] || 'us-west-2' %>
+  AWS_PROFILE: <%= ENV['AWS_PROFILE'] || 'default' %>
+  TF_VAR_environment: test
+  TF_VAR_project_name: iac-framework-test
+  TF_LOG: <%= ENV['TF_LOG'] || 'INFO' %>
+  
+# Terraform specific configuration
+terraform:
+  cli_config_file: <%= ENV['TF_CLI_CONFIG_FILE'] || '' %>
+  backend_config:
+    bucket: <%= ENV['TF_STATE_BUCKET'] || 'iac-framework-terraform-state-test' %>
+    key: kitchen-terraform/terraform.tfstate
+    region: <%= ENV['AWS_DEFAULT_REGION'] || 'us-west-2' %>
+    dynamodb_table: <%= ENV['TF_STATE_LOCK_TABLE'] || 'iac-framework-terraform-locks' %>
+    encrypt: true
+    
+# Test configuration
+test_base_path: test/integration
+reporting:
+  junit_output: test/reports/junit.xml
+  html_output: test/reports/kitchen-terraform.html
+  json_output: test/reports/kitchen-terraform.json
+
+# Parallel execution
+concurrency: 3
+max_ssh_sessions: 10
+
+# Retry configuration
+retry_on_exit_code: [1, 2]
+max_retries: 2
+
+# Logging configuration
+log_level: <%= ENV['KITCHEN_LOG_LEVEL'] || 'info' %>
+log_overwrite: true
