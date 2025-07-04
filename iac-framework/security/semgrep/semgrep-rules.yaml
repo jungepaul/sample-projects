@@ -1,0 +1,539 @@
+# Semgrep Rules for Infrastructure as Code Security
+# Custom security rules for Terraform, YAML, and other IaC files
+
+rules:
+
+# =============================================================================
+# Terraform Security Rules
+# =============================================================================
+
+# Detect hardcoded secrets in Terraform
+- id: terraform-hardcoded-secrets
+  patterns:
+    - pattern-either:
+        - pattern: |
+            password = "$VALUE"
+        - pattern: |
+            secret = "$VALUE"
+        - pattern: |
+            api_key = "$VALUE"
+        - pattern: |
+            access_key = "$VALUE"
+        - pattern: |
+            private_key = "$VALUE"
+  message: "Hardcoded secret detected in Terraform configuration"
+  languages: [hcl]
+  severity: ERROR
+  metadata:
+    category: security
+    technology: [terraform]
+    confidence: HIGH
+    cwe: "CWE-798: Use of Hard-coded Credentials"
+    owasp: "A07:2021 – Identification and Authentication Failures"
+    references:
+      - https://registry.terraform.io/providers/hashicorp/aws/latest/docs/guides/resource-tagging
+    likelihood: HIGH
+    impact: HIGH
+
+# Detect missing encryption in S3 buckets
+- id: terraform-s3-no-encryption
+  patterns:
+    - pattern: |
+        resource "aws_s3_bucket" "$NAME" {
+          ...
+        }
+    - pattern-not: |
+        resource "aws_s3_bucket" "$NAME" {
+          ...
+          server_side_encryption_configuration {
+            ...
+          }
+          ...
+        }
+  message: "S3 bucket should have encryption configured"
+  languages: [hcl]
+  severity: WARNING
+  metadata:
+    category: security
+    technology: [terraform, aws]
+    confidence: HIGH
+    cwe: "CWE-311: Missing Encryption of Sensitive Data"
+
+# Detect public S3 bucket configurations
+- id: terraform-s3-public-access
+  patterns:
+    - pattern-either:
+        - pattern: |
+            resource "aws_s3_bucket_acl" "$NAME" {
+              acl = "public-read"
+            }
+        - pattern: |
+            resource "aws_s3_bucket_acl" "$NAME" {
+              acl = "public-read-write"
+            }
+        - pattern: |
+            resource "aws_s3_bucket_public_access_block" "$NAME" {
+              block_public_acls = false
+            }
+  message: "S3 bucket configured with public access"
+  languages: [hcl]
+  severity: ERROR
+  metadata:
+    category: security
+    technology: [terraform, aws]
+    confidence: HIGH
+    cwe: "CWE-732: Incorrect Permission Assignment for Critical Resource"
+
+# Detect unencrypted RDS instances
+- id: terraform-rds-no-encryption
+  patterns:
+    - pattern: |
+        resource "aws_db_instance" "$NAME" {
+          ...
+        }
+    - pattern-not: |
+        resource "aws_db_instance" "$NAME" {
+          ...
+          storage_encrypted = true
+          ...
+        }
+  message: "RDS instance should have storage encryption enabled"
+  languages: [hcl]
+  severity: ERROR
+  metadata:
+    category: security
+    technology: [terraform, aws]
+    confidence: HIGH
+    cwe: "CWE-311: Missing Encryption of Sensitive Data"
+
+# Detect security groups with overly permissive rules
+- id: terraform-sg-open-to-world
+  patterns:
+    - pattern: |
+        resource "aws_security_group" "$NAME" {
+          ...
+          ingress {
+            ...
+            cidr_blocks = ["0.0.0.0/0"]
+            ...
+          }
+          ...
+        }
+    - pattern-not: |
+        resource "aws_security_group" "$NAME" {
+          ...
+          ingress {
+            from_port = 80
+            to_port = 80
+            ...
+            cidr_blocks = ["0.0.0.0/0"]
+            ...
+          }
+          ...
+        }
+    - pattern-not: |
+        resource "aws_security_group" "$NAME" {
+          ...
+          ingress {
+            from_port = 443
+            to_port = 443
+            ...
+            cidr_blocks = ["0.0.0.0/0"]
+            ...
+          }
+          ...
+        }
+  message: "Security group allows unrestricted access from internet"
+  languages: [hcl]
+  severity: ERROR
+  metadata:
+    category: security
+    technology: [terraform, aws]
+    confidence: HIGH
+    cwe: "CWE-284: Improper Access Control"
+
+# Detect missing mandatory tags
+- id: terraform-missing-mandatory-tags
+  patterns:
+    - pattern: |
+        resource "$TYPE" "$NAME" {
+          ...
+        }
+    - pattern-not: |
+        resource "$TYPE" "$NAME" {
+          ...
+          tags = {
+            ...
+            Environment = "..."
+            ...
+          }
+          ...
+        }
+    - metavariable-regex:
+        metavariable: $TYPE
+        regex: ^(aws_instance|aws_s3_bucket|aws_rds_cluster|aws_ecs_cluster)$
+  message: "Resource missing mandatory 'Environment' tag"
+  languages: [hcl]
+  severity: WARNING
+  metadata:
+    category: best-practice
+    technology: [terraform, aws]
+    confidence: MEDIUM
+
+# Detect IAM policies with wildcard permissions
+- id: terraform-iam-wildcard-permissions
+  patterns:
+    - pattern: |
+        resource "aws_iam_policy" "$NAME" {
+          policy = jsonencode({
+            ...
+            Statement = [
+              {
+                Effect = "Allow"
+                Action = "*"
+                Resource = "..."
+              }
+            ]
+            ...
+          })
+        }
+  message: "IAM policy uses wildcard (*) for actions"
+  languages: [hcl]
+  severity: ERROR
+  metadata:
+    category: security
+    technology: [terraform, aws, iam]
+    confidence: HIGH
+    cwe: "CWE-732: Incorrect Permission Assignment for Critical Resource"
+
+# =============================================================================
+# Kubernetes/YAML Security Rules
+# =============================================================================
+
+# Detect containers running as root
+- id: k8s-container-as-root
+  patterns:
+    - pattern: |
+        spec:
+          ...
+          containers:
+            - ...
+              securityContext:
+                runAsUser: 0
+              ...
+  message: "Container configured to run as root user"
+  languages: [yaml]
+  severity: WARNING
+  metadata:
+    category: security
+    technology: [kubernetes]
+    confidence: HIGH
+    cwe: "CWE-250: Execution with Unnecessary Privileges"
+
+# Detect privileged containers
+- id: k8s-privileged-container
+  patterns:
+    - pattern: |
+        spec:
+          ...
+          containers:
+            - ...
+              securityContext:
+                privileged: true
+              ...
+  message: "Container configured with privileged access"
+  languages: [yaml]
+  severity: ERROR
+  metadata:
+    category: security
+    technology: [kubernetes]
+    confidence: HIGH
+    cwe: "CWE-250: Execution with Unnecessary Privileges"
+
+# Detect missing resource limits
+- id: k8s-missing-resource-limits
+  patterns:
+    - pattern: |
+        spec:
+          ...
+          containers:
+            - name: $NAME
+              ...
+    - pattern-not: |
+        spec:
+          ...
+          containers:
+            - name: $NAME
+              ...
+              resources:
+                limits:
+                  ...
+              ...
+  message: "Container missing resource limits"
+  languages: [yaml]
+  severity: WARNING
+  metadata:
+    category: reliability
+    technology: [kubernetes]
+    confidence: MEDIUM
+
+# Detect hardcoded secrets in Kubernetes manifests
+- id: k8s-hardcoded-secrets
+  patterns:
+    - pattern-either:
+        - pattern: |
+            password: "$VALUE"
+        - pattern: |
+            secret: "$VALUE"
+        - pattern: |
+            api_key: "$VALUE"
+        - pattern: |
+            token: "$VALUE"
+  message: "Hardcoded secret in Kubernetes manifest"
+  languages: [yaml]
+  severity: ERROR
+  metadata:
+    category: security
+    technology: [kubernetes]
+    confidence: HIGH
+    cwe: "CWE-798: Use of Hard-coded Credentials"
+
+# =============================================================================
+# Docker Security Rules
+# =============================================================================
+
+# Detect running as root in Dockerfile
+- id: dockerfile-user-root
+  patterns:
+    - pattern: USER root
+    - pattern: USER 0
+  message: "Dockerfile sets user to root"
+  languages: [dockerfile]
+  severity: WARNING
+  metadata:
+    category: security
+    technology: [docker]
+    confidence: HIGH
+    cwe: "CWE-250: Execution with Unnecessary Privileges"
+
+# Detect ADD instead of COPY
+- id: dockerfile-use-add
+  patterns:
+    - pattern: ADD $SRC $DEST
+    - pattern-not: ADD http://... $DEST
+    - pattern-not: ADD https://... $DEST
+  message: "Use COPY instead of ADD for local files"
+  languages: [dockerfile]
+  severity: INFO
+  metadata:
+    category: best-practice
+    technology: [docker]
+    confidence: MEDIUM
+
+# =============================================================================
+# General Configuration Security Rules
+# =============================================================================
+
+# Detect HTTP URLs in configuration
+- id: config-http-url
+  patterns:
+    - pattern-regex: 'http://[^\s"]+'
+  message: "HTTP URL detected, consider using HTTPS"
+  languages: [yaml, json, hcl]
+  severity: INFO
+  metadata:
+    category: security
+    technology: [general]
+    confidence: LOW
+
+# Detect potential API keys in configuration
+- id: config-potential-api-key
+  patterns:
+    - pattern-regex: '(?i)(api[_-]?key|apikey)["\']?\s*[:=]\s*["\'][a-zA-Z0-9_-]{20,}["\']'
+  message: "Potential API key detected in configuration"
+  languages: [yaml, json, hcl]
+  severity: ERROR
+  metadata:
+    category: security
+    technology: [general]
+    confidence: MEDIUM
+    cwe: "CWE-798: Use of Hard-coded Credentials"
+
+# =============================================================================
+# Cloud Provider Specific Rules
+# =============================================================================
+
+# AWS CloudTrail without encryption
+- id: terraform-cloudtrail-no-encryption
+  patterns:
+    - pattern: |
+        resource "aws_cloudtrail" "$NAME" {
+          ...
+        }
+    - pattern-not: |
+        resource "aws_cloudtrail" "$NAME" {
+          ...
+          kms_key_id = "..."
+          ...
+        }
+  message: "CloudTrail should be encrypted with KMS"
+  languages: [hcl]
+  severity: WARNING
+  metadata:
+    category: security
+    technology: [terraform, aws]
+    confidence: HIGH
+
+# ELB without access logging
+- id: terraform-elb-no-access-logs
+  patterns:
+    - pattern: |
+        resource "aws_lb" "$NAME" {
+          ...
+        }
+    - pattern-not: |
+        resource "aws_lb" "$NAME" {
+          ...
+          access_logs {
+            enabled = true
+            ...
+          }
+          ...
+        }
+  message: "Load balancer should have access logging enabled"
+  languages: [hcl]
+  severity: INFO
+  metadata:
+    category: observability
+    technology: [terraform, aws]
+    confidence: MEDIUM
+
+# =============================================================================
+# Compliance Rules
+# =============================================================================
+
+# GDPR - Data retention policy missing
+- id: terraform-missing-data-retention
+  patterns:
+    - pattern: |
+        resource "aws_s3_bucket" "$NAME" {
+          ...
+        }
+    - pattern-not: |
+        resource "aws_s3_bucket" "$NAME" {
+          ...
+          lifecycle_rule {
+            ...
+          }
+          ...
+        }
+    - metavariable-regex:
+        metavariable: $NAME
+        regex: .*(personal|user|customer|pii).*
+  message: "S3 bucket storing personal data should have lifecycle policy"
+  languages: [hcl]
+  severity: WARNING
+  metadata:
+    category: compliance
+    technology: [terraform, aws]
+    confidence: MEDIUM
+    cwe: "CWE-404: Improper Resource Shutdown or Release"
+
+# SOC2 - Missing backup configuration
+- id: terraform-missing-backup
+  patterns:
+    - pattern: |
+        resource "aws_db_instance" "$NAME" {
+          ...
+        }
+    - pattern-not: |
+        resource "aws_db_instance" "$NAME" {
+          ...
+          backup_retention_period = $DAYS
+          ...
+        }
+  message: "RDS instance should have backup retention configured"
+  languages: [hcl]
+  severity: WARNING
+  metadata:
+    category: compliance
+    technology: [terraform, aws]
+    confidence: HIGH
+
+# =============================================================================
+# Performance and Cost Rules
+# =============================================================================
+
+# Expensive instance types in non-production
+- id: terraform-expensive-instance-nonprod
+  patterns:
+    - pattern: |
+        resource "aws_instance" "$NAME" {
+          instance_type = "$TYPE"
+          tags = {
+            ...
+            Environment = "dev"
+            ...
+          }
+          ...
+        }
+    - metavariable-regex:
+        metavariable: $TYPE
+        regex: .*(8xlarge|12xlarge|16xlarge|24xlarge).*
+  message: "Expensive instance type used in development environment"
+  languages: [hcl]
+  severity: WARNING
+  metadata:
+    category: cost-optimization
+    technology: [terraform, aws]
+    confidence: HIGH
+
+# =============================================================================
+# Custom Organization Rules
+# =============================================================================
+
+# Enforce naming conventions
+- id: terraform-naming-convention
+  patterns:
+    - pattern: |
+        resource "$TYPE" "$NAME" {
+          ...
+        }
+    - metavariable-regex:
+        metavariable: $NAME
+        regex: ^(?!.*-(dev|staging|prod)-.*).*$
+  message: "Resource name should include environment suffix"
+  languages: [hcl]
+  severity: INFO
+  metadata:
+    category: best-practice
+    technology: [terraform]
+    confidence: LOW
+
+# Require specific provider versions
+- id: terraform-provider-version-pinning
+  patterns:
+    - pattern: |
+        terraform {
+          required_providers {
+            aws = {
+              source = "hashicorp/aws"
+            }
+          }
+        }
+    - pattern-not: |
+        terraform {
+          required_providers {
+            aws = {
+              source = "hashicorp/aws"
+              version = "..."
+            }
+          }
+        }
+  message: "Provider version should be pinned"
+  languages: [hcl]
+  severity: WARNING
+  metadata:
+    category: best-practice
+    technology: [terraform]
+    confidence: MEDIUM

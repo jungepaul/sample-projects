@@ -1,0 +1,347 @@
+# Checkov Configuration for Infrastructure Security Scanning
+# This file configures Checkov security and compliance scanning
+
+# =============================================================================
+# Framework Configuration
+# =============================================================================
+framework:
+  - terraform
+  - cloudformation  
+  - kubernetes
+  - dockerfile
+  - helm
+  - secrets
+
+# =============================================================================
+# Output Configuration
+# =============================================================================
+output:
+  - cli
+  - json
+  - junit
+  - sarif
+
+# Output file paths
+output-file-path: ./checkov-results.json
+output-sarif-file-path: ./checkov-results.sarif
+output-junit-file-path: ./checkov-results.xml
+
+# =============================================================================
+# Scan Configuration  
+# =============================================================================
+
+# Directories to scan
+directory: 
+  - ./modules
+  - ./examples
+  - ./workflows
+
+# Files to exclude from scanning
+skip-path:
+  - ./.terraform/
+  - ./.git/
+  - ./node_modules/
+  - ./venv/
+  - ./.github/workflows/
+
+# File types to exclude
+skip-file:
+  - "*.tmp"
+  - "*.backup"
+  - "*.bak"
+
+# =============================================================================
+# Check Configuration
+# =============================================================================
+
+# Skip specific checks (check IDs)
+skip-check:
+  # Skip checks that may not apply to our use case
+  - CKV_AWS_79   # Ensure Instance Metadata Service Version 1 is not enabled (if using IMDSv1 intentionally)
+  - CKV_AWS_8    # Ensure all data stored in the Launch configuration EBS is securely encrypted at rest (handled by module)
+  - CKV_TF_1     # Ensure Terraform module sources use a commit hash (may use tags)
+  
+  # Skip checks for development/testing environments
+  - CKV_AWS_24   # Ensure no security groups allow ingress from 0.0.0.0:0 to port 22 (dev environments may need this)
+  - CKV_AWS_25   # Ensure no security groups allow ingress from 0.0.0.0:0 to port 3389
+
+# Skip checks by severity
+# skip-cve-package: []
+
+# Skip entire frameworks if needed
+# skip-framework: []
+
+# =============================================================================
+# Custom Checks
+# =============================================================================
+
+# External check directories
+external-checks-dir:
+  - ./security/custom-checks/
+
+# Custom policies repository
+# external-checks-git:
+#   - git_url: https://github.com/company/custom-checkov-policies.git
+#     branch: main
+#     username: ${GIT_USERNAME}
+#     token: ${GIT_TOKEN}
+
+# =============================================================================
+# Suppression Configuration
+# =============================================================================
+
+# Baseline file for ignoring existing issues
+# baseline: ./checkov-baseline.json
+
+# Suppression configuration
+suppressions:
+  # Suppress findings for development environment
+  - check_id: CKV_AWS_88
+    file_path: examples/environments/dev/
+    justification: "Development environment allows public access for testing"
+    
+  - check_id: CKV_AWS_23
+    file_path: examples/environments/dev/
+    justification: "Development S3 buckets don't require MFA delete"
+
+# =============================================================================
+# Compliance Frameworks
+# =============================================================================
+
+# Check compliance against specific frameworks
+check:
+  - CIS_AWS
+  - SOC2
+  - PCI_DSS
+  - GDPR
+  - NIST_800_53
+  - ISO_27001
+  - HIPAA
+
+# Compact compliance report
+compact: false
+
+# =============================================================================
+# Secrets Scanning
+# =============================================================================
+
+# Enable secrets scanning
+enable-secret-scan-all-files: true
+
+# Custom secrets patterns
+secrets:
+  # Additional patterns beyond default
+  - name: "API_KEY"
+    pattern: "api[_-]?key[\\s]*[:=][\\s]*['\"]?[a-zA-Z0-9_-]{20,}['\"]?"
+    
+  - name: "DATABASE_URL" 
+    pattern: "(postgres|mysql|mongodb)://[^\\s]+"
+    
+  - name: "PRIVATE_KEY"
+    pattern: "-----BEGIN (RSA |EC |DSA )?PRIVATE KEY-----"
+
+# Entropy threshold for secret detection
+entropy-threshold: 4.5
+
+# =============================================================================
+# Soft Fail Configuration
+# =============================================================================
+
+# Continue execution even if issues are found
+soft-fail: true
+
+# Exit with code 0 even if issues found
+soft-fail-on: 
+  - CKV_AWS_20  # S3 Bucket has an ACL defined which allows public read access
+  - CKV_AWS_57  # S3 Bucket has an ACL defined which allows public WRITE access
+
+# =============================================================================
+# Performance Configuration
+# =============================================================================
+
+# Parallel execution
+parallel: true
+
+# Number of parallel workers
+workers: 4
+
+# Download external checks timeout
+download-external-modules: true
+external-modules-download-path: ./.checkov/
+
+# =============================================================================
+# Integration Configuration
+# =============================================================================
+
+# Prisma Cloud integration
+# prisma-api-url: https://api.prismacloud.io
+# bc-api-key: ${PRISMA_API_KEY}
+
+# Custom CA bundle
+# ca-certificate: /path/to/ca-bundle.crt
+
+# Proxy configuration
+# proxy: http://proxy.company.com:8080
+
+# =============================================================================
+# Reporting Configuration
+# =============================================================================
+
+# Include severity in output
+include-all-checkov-policies: true
+
+# Detailed exit codes
+use-enforcement-rules: false
+
+# Show progress bar
+quiet: false
+
+# Log level
+log-level: INFO
+
+# =============================================================================
+# Custom Tags and Metadata
+# =============================================================================
+
+# Add custom tags to findings
+tags:
+  team: infrastructure
+  scanner: checkov
+  compliance: enabled
+
+# Add custom metadata
+metadata:
+  scan_type: "infrastructure_security"
+  environment: "ci_cd"
+  repository: "${GITHUB_REPOSITORY:-unknown}"
+  branch: "${GITHUB_REF_NAME:-unknown}"
+  commit: "${GITHUB_SHA:-unknown}"
+
+# =============================================================================
+# Exception Handling
+# =============================================================================
+
+# Handle specific file formats
+config-file-format:
+  - yaml
+  - yml
+  - json
+
+# Custom resource mapping
+# custom-checks-file: ./security/custom-resource-mapping.yaml
+
+# =============================================================================
+# Docker Configuration (if scanning containers)
+# =============================================================================
+
+# Dockerfile checks
+dockerfile:
+  # Check for exposed secrets in layers
+  secrets: true
+  
+  # Check for vulnerable base images
+  vulnerabilities: true
+  
+  # Custom Dockerfile policies
+  # policies-dir: ./security/dockerfile-policies/
+
+# =============================================================================
+# Kubernetes Configuration
+# =============================================================================
+
+kubernetes:
+  # Check Kubernetes manifests
+  manifest-files: true
+  
+  # Check Helm charts
+  helm-charts: true
+  
+  # Custom Kubernetes policies
+  # policies-dir: ./security/k8s-policies/
+
+# =============================================================================
+# Variables and Secrets
+# =============================================================================
+
+# Variable files to include
+var-file:
+  - examples/environments/dev/terraform.tfvars
+  - examples/environments/staging/terraform.tfvars
+  - examples/environments/prod/terraform.tfvars
+
+# Environment variables to include in scan
+env-vars:
+  - AWS_REGION
+  - ENVIRONMENT
+  - PROJECT_NAME
+
+# =============================================================================
+# Advanced Configuration
+# =============================================================================
+
+# Create JUnit XML for CI/CD integration
+create-junit-xml: true
+
+# Create baseline if it doesn't exist
+create-baseline: false
+
+# Update baseline with new findings
+update-baseline: false
+
+# Deep analysis mode
+deep-analysis: true
+
+# Include SCA (Software Composition Analysis)
+# sca-package-files:
+#   - package.json
+#   - requirements.txt
+#   - go.mod
+#   - pom.xml
+
+# License compliance scanning
+# check-licenses: true
+# license-policy: ./security/license-policy.json
+
+# =============================================================================
+# Custom Policy Development
+# =============================================================================
+
+# Policy development mode
+# dev-mode: false
+
+# Policy testing configuration
+# policy-metadata:
+#   version: "1.0"
+#   author: "Infrastructure Team"
+#   description: "Custom security policies for infrastructure"
+
+# =============================================================================
+# CI/CD Integration Helpers
+# =============================================================================
+
+# Annotation format for GitHub Actions
+github-action-config:
+  # Add annotations to PR
+  annotate: true
+  
+  # Annotation level
+  annotation-level: warning
+  
+  # Maximum annotations per run
+  max-annotations: 50
+
+# GitLab CI configuration
+gitlab-ci-config:
+  # Create GitLab CI artifact
+  create-artifact: true
+  
+  # Artifact path
+  artifact-path: ./checkov-gitlab-report.json
+
+# Jenkins configuration
+jenkins-config:
+  # Create Jenkins-compatible report
+  create-report: true
+  
+  # Report format
+  report-format: junit

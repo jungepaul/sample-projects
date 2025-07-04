@@ -1,0 +1,48 @@
+# Gemfile for Kitchen-Terraform testing
+
+source 'https://rubygems.org'
+
+# Kitchen-Terraform and dependencies
+gem 'kitchen-terraform', '~> 7.0'
+gem 'test-kitchen', '~> 3.5'
+
+# AWS SDK for Ruby
+gem 'aws-sdk-ec2', '~> 1.0'
+gem 'aws-sdk-iam', '~> 1.0'
+gem 'aws-sdk-s3', '~> 1.0'
+gem 'aws-sdk-rds', '~> 1.0'
+
+# Testing frameworks
+gem 'rspec', '~> 3.12'
+gem 'serverspec', '~> 2.42'
+gem 'awspec', '~> 1.26'
+
+# Utility gems
+gem 'thor', '~> 1.2'
+gem 'dotenv', '~> 2.8'
+gem 'json', '~> 2.6'
+gem 'yaml', '~> 0.2'
+
+# Development and debugging
+gem 'pry', '~> 0.14'
+gem 'rubocop', '~> 1.56'
+gem 'simplecov', '~> 0.22'
+
+# Logging and output
+gem 'colorize', '~> 0.8'
+gem 'progressbar', '~> 1.13'
+
+# Parallel execution
+gem 'parallel', '~> 1.23'
+
+# HTTP client for API testing
+gem 'faraday', '~> 2.7'
+gem 'httparty', '~> 0.21'
+
+# Configuration management
+gem 'hashie', '~> 5.0'
+
+# Additional testing utilities
+gem 'timecop', '~> 0.9'
+gem 'webmock', '~> 3.19'
+gem 'vcr', '~> 6.2'

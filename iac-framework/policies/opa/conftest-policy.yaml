@@ -1,0 +1,83 @@
+# Conftest Configuration for Terraform Plan Analysis
+# This file configures how Conftest should analyze Terraform plans
+
+policy:
+  # Policy namespaces to evaluate
+  namespaces:
+    - aws.security
+    - aws.compliance
+    - aws.cost
+  
+  # Failure conditions
+  failures:
+    # Fail on any deny rules
+    - deny_public_s3_read
+    - deny_unencrypted_ec2_root
+    - deny_ec2_public_subnet_prod
+    - deny_sg_unrestricted_inbound
+    - deny_ssh_from_anywhere
+    - deny_rdp_from_anywhere
+    - deny_public_rds
+    - deny_iam_wildcard_resources_prod
+  
+  # Warning conditions
+  warnings:
+    - require_s3_encryption
+    - require_s3_versioning
+    - require_rds_encryption
+    - require_rds_backup_prod
+    - require_deletion_protection_prod
+    - require_mfa_console_access
+    - require_vpc_flow_logs_prod
+    - require_ebs_encryption
+    - require_lambda_vpc_prod
+    - require_lambda_encryption
+    - require_cloudtrail_encryption
+    - require_cloudtrail_validation
+    - require_mandatory_tags
+    - validate_environment_tag
+    - restrict_expensive_instances
+    - require_gdpr_deletion_protection
+    - require_sox_encryption
+    - enforce_instance_types_prod
+
+# Output configuration
+output:
+  format: "table"  # Options: json, yaml, table, tap, junit
+  
+# Combine multiple policy files
+combine: true
+
+# Trace policy evaluation (for debugging)
+trace: false
+
+# Strict mode - fail on warnings
+strict: false
+
+# Input data transformation
+data:
+  # Transform Terraform plan JSON to expected format
+  terraform_plan: |
+    {
+      "resource_changes": input.resource_changes,
+      "configuration": input.configuration
+    }
+
+# Exclusions - resources to skip policy evaluation
+exclusions:
+  # Skip test resources
+  - "*.test.*"
+  # Skip data sources
+  - "data.*"
+
+# Severity levels
+severity:
+  deny_public_s3_read: "high"
+  deny_unencrypted_ec2_root: "high"
+  deny_sg_unrestricted_inbound: "high"
+  deny_ssh_from_anywhere: "critical"
+  deny_rdp_from_anywhere: "critical"
+  deny_public_rds: "high"
+  deny_iam_wildcard_resources_prod: "medium"
+  require_mandatory_tags: "low"
+  restrict_expensive_instances: "medium"

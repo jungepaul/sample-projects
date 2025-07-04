@@ -1,0 +1,390 @@
+# Sentinel Policies for AWS Security
+# These policies are designed for HashiCorp Terraform Cloud/Enterprise
+
+import "tfplan/v2" as tfplan
+import "strings"
+import "types"
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+# Get all resources of a specific type
+get_resources = func(resource_type) {
+    resources = {}
+    for tfplan.resource_changes as address, rc {
+        if rc.type is resource_type {
+            resources[address] = rc
+        }
+    }
+    return resources
+}
+
+# Check if a resource has a specific tag
+has_tag = func(resource, tag_key) {
+    if "tags" in resource.change.after and tag_key in resource.change.after.tags {
+        return true
+    }
+    return false
+}
+
+# Get tag value
+get_tag_value = func(resource, tag_key) {
+    if has_tag(resource, tag_key) {
+        return resource.change.after.tags[tag_key]
+    }
+    return null
+}
+
+# Check if environment is production
+is_production = func(resource) {
+    environment = get_tag_value(resource, "Environment")
+    return environment is "prod"
+}
+
+# Print violation message
+print_violation = func(address, message) {
+    print("VIOLATION:", address, "-", message)
+}
+
+# =============================================================================
+# S3 Bucket Security Policies
+# =============================================================================
+
+# Policy: S3 buckets must not allow public read access
+s3_no_public_read = rule {
+    all tfplan.resource_changes as address, rc {
+        if rc.type is "aws_s3_bucket_public_access_block" {
+            rc.change.after.block_public_acls is true and
+            rc.change.after.block_public_policy is true and
+            rc.change.after.ignore_public_acls is true and
+            rc.change.after.restrict_public_buckets is true
+        } else {
+            true
+        }
+    }
+}
+
+# Policy: S3 buckets must have encryption enabled
+s3_encryption_required = rule {
+    all get_resources("aws_s3_bucket") as address, resource {
+        if "server_side_encryption_configuration" in resource.change.after {
+            length(resource.change.after.server_side_encryption_configuration) > 0
+        } else {
+            print_violation(address, "S3 bucket must have server-side encryption enabled")
+            false
+        }
+    }
+}
+
+# Policy: S3 buckets in production must have versioning enabled
+s3_versioning_production = rule {
+    all get_resources("aws_s3_bucket_versioning") as address, resource {
+        if is_production(resource) {
+            if "versioning_configuration" in resource.change.after {
+                resource.change.after.versioning_configuration[0].status is "Enabled"
+            } else {
+                print_violation(address, "Production S3 bucket must have versioning enabled")
+                false
+            }
+        } else {
+            true
+        }
+    }
+}
+
+# =============================================================================
+# EC2 Security Policies
+# =============================================================================
+
+# Policy: EC2 instances must have encrypted root volumes
+ec2_encrypted_root_volume = rule {
+    all get_resources("aws_instance") as address, resource {
+        if "root_block_device" in resource.change.after and 
+           length(resource.change.after.root_block_device) > 0 {
+            resource.change.after.root_block_device[0].encrypted is true
+        } else {
+            print_violation(address, "EC2 instance root volume must be encrypted")
+            false
+        }
+    }
+}
+
+# Policy: Production EC2 instances must not have public IP addresses
+ec2_no_public_ip_production = rule {
+    all get_resources("aws_instance") as address, resource {
+        if is_production(resource) {
+            if "associate_public_ip_address" in resource.change.after {
+                resource.change.after.associate_public_ip_address is false
+            } else {
+                true
+            }
+        } else {
+            true
+        }
+    }
+}
+
+# Policy: Restrict instance types for production workloads
+ec2_allowed_instance_types_production = rule {
+    allowed_types = [
+        "t3.medium", "t3.large", "t3.xlarge", "t3.2xlarge",
+        "m5.large", "m5.xlarge", "m5.2xlarge", "m5.4xlarge",
+        "c5.large", "c5.xlarge", "c5.2xlarge", "c5.4xlarge"
+    ]
+    
+    all get_resources("aws_instance") as address, resource {
+        if is_production(resource) {
+            resource.change.after.instance_type in allowed_types
+        } else {
+            true
+        }
+    }
+}
+
+# =============================================================================
+# Security Group Policies
+# =============================================================================
+
+# Policy: Security groups must not allow SSH from anywhere
+security_group_no_ssh_from_anywhere = rule {
+    all get_resources("aws_security_group") as address, resource {
+        if "ingress" in resource.change.after {
+            all resource.change.after.ingress as ingress_rule {
+                if ingress_rule.from_port <= 22 and ingress_rule.to_port >= 22 {
+                    "0.0.0.0/0" not in ingress_rule.cidr_blocks
+                } else {
+                    true
+                }
+            }
+        } else {
+            true
+        }
+    }
+}
+
+# Policy: Security groups must not allow RDP from anywhere
+security_group_no_rdp_from_anywhere = rule {
+    all get_resources("aws_security_group") as address, resource {
+        if "ingress" in resource.change.after {
+            all resource.change.after.ingress as ingress_rule {
+                if ingress_rule.from_port <= 3389 and ingress_rule.to_port >= 3389 {
+                    "0.0.0.0/0" not in ingress_rule.cidr_blocks
+                } else {
+                    true
+                }
+            }
+        } else {
+            true
+        }
+    }
+}
+
+# Policy: Security groups must not have unrestricted inbound access
+security_group_no_unrestricted_access = rule {
+    all get_resources("aws_security_group") as address, resource {
+        if "ingress" in resource.change.after {
+            all resource.change.after.ingress as ingress_rule {
+                if "0.0.0.0/0" in ingress_rule.cidr_blocks {
+                    # Allow HTTP and HTTPS from anywhere
+                    ingress_rule.from_port is 80 or 
+                    ingress_rule.from_port is 443
+                } else {
+                    true
+                }
+            }
+        } else {
+            true
+        }
+    }
+}
+
+# =============================================================================
+# RDS Security Policies
+# =============================================================================
+
+# Policy: RDS instances must have encryption enabled
+rds_encryption_required = rule {
+    all get_resources("aws_db_instance") as address, resource {
+        resource.change.after.storage_encrypted is true
+    }
+}
+
+# Policy: RDS instances must not be publicly accessible
+rds_not_publicly_accessible = rule {
+    all get_resources("aws_db_instance") as address, resource {
+        resource.change.after.publicly_accessible is false
+    }
+}
+
+# Policy: Production RDS instances must have backup retention >= 7 days
+rds_backup_retention_production = rule {
+    all get_resources("aws_db_instance") as address, resource {
+        if is_production(resource) {
+            resource.change.after.backup_retention_period >= 7
+        } else {
+            true
+        }
+    }
+}
+
+# Policy: Production RDS instances must have deletion protection
+rds_deletion_protection_production = rule {
+    all get_resources("aws_db_instance") as address, resource {
+        if is_production(resource) {
+            resource.change.after.deletion_protection is true
+        } else {
+            true
+        }
+    }
+}
+
+# =============================================================================
+# IAM Security Policies
+# =============================================================================
+
+# Policy: IAM policies in production must not use wildcard resources
+iam_no_wildcard_resources_production = rule {
+    all get_resources("aws_iam_policy") as address, resource {
+        if is_production(resource) and "policy" in resource.change.after {
+            policy_doc = json.unmarshal(resource.change.after.policy)
+            all policy_doc.Statement as statement {
+                if statement.Effect is "Allow" and types.type_of(statement.Resource) is "list" {
+                    "*" not in statement.Resource
+                } else if statement.Effect is "Allow" and types.type_of(statement.Resource) is "string" {
+                    statement.Resource is not "*"
+                } else {
+                    true
+                }
+            }
+        } else {
+            true
+        }
+    }
+}
+
+# =============================================================================
+# EBS Security Policies
+# =============================================================================
+
+# Policy: EBS volumes must be encrypted
+ebs_encryption_required = rule {
+    all get_resources("aws_ebs_volume") as address, resource {
+        resource.change.after.encrypted is true
+    }
+}
+
+# =============================================================================
+# Lambda Security Policies
+# =============================================================================
+
+# Policy: Production Lambda functions should be in VPC
+lambda_vpc_production = rule {
+    all get_resources("aws_lambda_function") as address, resource {
+        if is_production(resource) {
+            "vpc_config" in resource.change.after and
+            length(resource.change.after.vpc_config) > 0
+        } else {
+            true
+        }
+    }
+}
+
+# =============================================================================
+# Tagging Policies
+# =============================================================================
+
+# Policy: All resources must have mandatory tags
+mandatory_tags_required = rule {
+    mandatory_tags = ["Environment", "Project", "Owner"]
+    
+    all tfplan.resource_changes as address, rc {
+        # Skip data sources and some resource types
+        if not strings.has_prefix(rc.type, "data.") and 
+           rc.type not in ["aws_caller_identity", "aws_region", "aws_availability_zones"] {
+            if "tags" in rc.change.after {
+                all mandatory_tags as tag {
+                    tag in rc.change.after.tags
+                }
+            } else {
+                print_violation(address, "Resource must have mandatory tags: " + strings.join(mandatory_tags, ", "))
+                false
+            }
+        } else {
+            true
+        }
+    }
+}
+
+# Policy: Environment tag must have valid values
+valid_environment_tag = rule {
+    valid_environments = ["dev", "staging", "prod", "test"]
+    
+    all tfplan.resource_changes as address, rc {
+        if not strings.has_prefix(rc.type, "data.") and has_tag(rc, "Environment") {
+            get_tag_value(rc, "Environment") in valid_environments
+        } else {
+            true
+        }
+    }
+}
+
+# =============================================================================
+# Cost Control Policies
+# =============================================================================
+
+# Policy: Restrict expensive instance types in non-production
+restrict_expensive_instances = rule {
+    expensive_types = [
+        "m5.4xlarge", "m5.8xlarge", "m5.12xlarge", "m5.16xlarge", "m5.24xlarge",
+        "c5.4xlarge", "c5.9xlarge", "c5.12xlarge", "c5.18xlarge", "c5.24xlarge",
+        "r5.4xlarge", "r5.8xlarge", "r5.12xlarge", "r5.16xlarge", "r5.24xlarge"
+    ]
+    
+    all get_resources("aws_instance") as address, resource {
+        if not is_production(resource) {
+            resource.change.after.instance_type not in expensive_types
+        } else {
+            true
+        }
+    }
+}
+
+# =============================================================================
+# Main Policy Rules
+# =============================================================================
+
+# Critical security policies (must pass)
+main = rule {
+    s3_no_public_read and
+    ec2_encrypted_root_volume and
+    security_group_no_ssh_from_anywhere and
+    security_group_no_rdp_from_anywhere and
+    rds_encryption_required and
+    rds_not_publicly_accessible and
+    ebs_encryption_required and
+    mandatory_tags_required and
+    valid_environment_tag
+}
+
+# Production-specific policies
+production_policies = rule {
+    s3_versioning_production and
+    ec2_no_public_ip_production and
+    ec2_allowed_instance_types_production and
+    rds_backup_retention_production and
+    rds_deletion_protection_production and
+    lambda_vpc_production and
+    iam_no_wildcard_resources_production
+}
+
+# Cost control policies
+cost_policies = rule {
+    restrict_expensive_instances
+}
+
+# Compliance policies
+compliance_policies = rule {
+    security_group_no_unrestricted_access and
+    s3_encryption_required
+}

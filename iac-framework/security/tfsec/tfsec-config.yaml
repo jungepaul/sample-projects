@@ -1,0 +1,408 @@
+# TFSec Configuration for Terraform Security Scanning
+# This file configures TFSec security scanning for Terraform code
+
+# =============================================================================
+# Basic Configuration
+# =============================================================================
+
+# Output format options: default, json, csv, checkstyle, junit, sarif, gif
+format: json
+
+# Output file (stdout if not specified)
+output: tfsec-results.json
+
+# Soft fail - exit with code 0 even if issues found
+soft-fail: true
+
+# Run in quiet mode
+quiet: false
+
+# Concurrency level
+concurrency: 4
+
+# =============================================================================
+# Scan Configuration
+# =============================================================================
+
+# Directories to include in scan
+include-paths:
+  - ./modules/
+  - ./examples/
+  - ./workflows/
+
+# Directories to exclude from scan
+exclude-paths:
+  - ./.terraform/
+  - ./.git/
+  - ./node_modules/
+  - ./.github/
+  - ./venv/
+
+# File patterns to exclude
+exclude-files:
+  - "*.backup"
+  - "*.tmp"
+  - "*.bak"
+  - "**/test/**"
+
+# =============================================================================
+# Check Configuration
+# =============================================================================
+
+# Specific checks to exclude
+exclude-checks:
+  # AWS S3 bucket checks that may not apply
+  - aws-s3-enable-bucket-logging          # May not need logging for all buckets
+  - aws-s3-enable-versioning               # Not required for all buckets
+  - aws-s3-specify-public-access-block     # Handled by separate resource
+  
+  # VPC checks that may not apply in all scenarios
+  - aws-vpc-no-excessive-port-access       # May need broad access in dev
+  - aws-vpc-no-public-egress-sgr          # May need public egress
+  
+  # RDS checks for development environments
+  - aws-rds-encrypt-instance-storage-data  # May skip encryption in dev
+  - aws-rds-no-public-db-access           # Dev databases may need public access
+
+# Checks to include (overrides global excludes)
+include-checks:
+  - aws-iam-no-policy-wildcards
+  - aws-ec2-enforce-http-token-imds
+  - aws-s3-enable-bucket-encryption
+  - aws-rds-encrypt-instance-storage-data
+
+# =============================================================================
+# Severity Configuration
+# =============================================================================
+
+# Minimum severity level to report (LOW, MEDIUM, HIGH, CRITICAL)
+minimum-severity: MEDIUM
+
+# Exclude specific severities
+exclude-severities:
+  - LOW
+
+# =============================================================================
+# Rule Configuration
+# =============================================================================
+
+# Custom rule directories
+custom-check-dir: ./security/custom-tfsec-rules/
+
+# Disable default rules and only use custom rules
+disable-built-in-rules: false
+
+# =============================================================================
+# Baseline and Suppression
+# =============================================================================
+
+# Baseline file for suppressing existing issues
+# baseline-file: ./tfsec-baseline.json
+
+# Configuration for inline suppressions
+allow-inline-suppressions: true
+
+# Configuration for .tfsec directory suppressions
+allow-download-config: true
+
+# =============================================================================
+# Filtering and Ignores
+# =============================================================================
+
+# Ignore specific rules by ID
+ignore:
+  # Development environment exceptions
+  - rule: aws-s3-enable-versioning
+    paths:
+      - "examples/environments/dev/**"
+    reason: "Development buckets don't require versioning"
+    
+  - rule: aws-vpc-no-excessive-port-access
+    paths:
+      - "examples/environments/dev/**"
+    reason: "Development environments may need broader access"
+    
+  - rule: aws-rds-no-public-db-access
+    paths:
+      - "examples/environments/dev/**"
+    reason: "Development databases may need public access for testing"
+
+# Ignore by resource
+ignore-by-resource:
+  - type: "aws_s3_bucket"
+    name: "dev-*"
+    rules:
+      - aws-s3-enable-bucket-logging
+      - aws-s3-enable-versioning
+
+# =============================================================================
+# Git Integration
+# =============================================================================
+
+# Git configuration for blame and history
+git-history: true
+git-ignore-files: true
+
+# =============================================================================
+# Debug and Verbose Output
+# =============================================================================
+
+# Debug mode
+debug: false
+
+# Verbose output
+verbose: false
+
+# Log level (TRACE, DEBUG, INFO, WARN, ERROR)
+log-level: INFO
+
+# =============================================================================
+# Workspace Configuration
+# =============================================================================
+
+# Terraform workspace to analyze
+workspace: ""
+
+# Variable files to consider
+var-files:
+  - "examples/environments/dev/terraform.tfvars"
+  - "examples/environments/staging/terraform.tfvars"
+  - "examples/environments/prod/terraform.tfvars"
+
+# =============================================================================
+# Cloud Provider Specific Configuration
+# =============================================================================
+
+# AWS-specific configuration
+aws:
+  # Custom AWS regions to validate against
+  regions:
+    - us-west-2
+    - us-east-1
+    - eu-west-1
+  
+  # Account ID patterns to validate
+  # account-ids:
+  #   - "123456789012"
+
+# Google Cloud specific configuration
+gcp:
+  # Project ID patterns
+  # project-ids:
+  #   - "my-project-*"
+  
+  # Regions to validate
+  regions:
+    - us-central1
+    - us-west1
+    - europe-west1
+
+# Azure specific configuration
+azure:
+  # Subscription ID patterns
+  # subscription-ids:
+  #   - "00000000-0000-0000-0000-000000000000"
+  
+  # Regions to validate
+  regions:
+    - westus2
+    - eastus
+    - westeurope
+
+# =============================================================================
+# Integration Configuration
+# =============================================================================
+
+# GitHub Actions integration
+github:
+  # Add annotations to pull requests
+  annotations: true
+  
+  # Maximum number of annotations
+  max-annotations: 50
+
+# GitLab CI integration
+gitlab:
+  # Generate GitLab Code Quality report
+  code-quality: true
+  
+  # Code quality report file
+  code-quality-file: gl-code-quality-report.json
+
+# Jenkins integration
+jenkins:
+  # Generate JUnit XML for Jenkins
+  junit: true
+  
+  # JUnit output file
+  junit-file: tfsec-junit.xml
+
+# =============================================================================
+# Custom Metadata
+# =============================================================================
+
+# Add custom tags to findings
+tags:
+  scanner: "tfsec"
+  team: "infrastructure"
+  compliance: "required"
+
+# Custom metadata to include in output
+metadata:
+  scan_timestamp: "{{ .Timestamp }}"
+  repository: "{{ .Repository }}"
+  branch: "{{ .Branch }}"
+  commit: "{{ .Commit }}"
+
+# =============================================================================
+# Performance Tuning
+# =============================================================================
+
+# Enable/disable specific performance optimizations
+performance:
+  # Use parallel processing
+  parallel: true
+  
+  # Cache terraform plans
+  cache-plans: true
+  
+  # Maximum memory usage (MB)
+  max-memory: 2048
+
+# =============================================================================
+# Output Customization
+# =============================================================================
+
+# Custom output templates
+templates:
+  # Custom JSON template
+  json-template: |
+    {
+      "results": {{ .Results }},
+      "summary": {
+        "total": {{ .Summary.Total }},
+        "passed": {{ .Summary.Passed }},
+        "failed": {{ .Summary.Failed }},
+        "critical": {{ .Summary.Critical }},
+        "high": {{ .Summary.High }},
+        "medium": {{ .Summary.Medium }},
+        "low": {{ .Summary.Low }}
+      },
+      "metadata": {
+        "scan_time": "{{ .ScanTime }}",
+        "version": "{{ .Version }}"
+      }
+    }
+
+# Include passed checks in output
+include-passed: false
+
+# Include ignored checks in output
+include-ignored: true
+
+# =============================================================================
+# Rule Development and Testing
+# =============================================================================
+
+# Development mode for custom rules
+development-mode: false
+
+# Test mode - validate rules without running them
+test-mode: false
+
+# Rule validation configuration
+rule-validation:
+  # Validate rule syntax
+  syntax: true
+  
+  # Validate rule metadata
+  metadata: true
+  
+  # Validate rule examples
+  examples: true
+
+# =============================================================================
+# Compliance Frameworks
+# =============================================================================
+
+# Map findings to compliance frameworks
+compliance-frameworks:
+  - name: "CIS"
+    mapping-file: "./security/mappings/cis-mapping.yaml"
+    
+  - name: "SOC2"
+    mapping-file: "./security/mappings/soc2-mapping.yaml"
+    
+  - name: "PCI_DSS"
+    mapping-file: "./security/mappings/pci-mapping.yaml"
+
+# =============================================================================
+# Reporting Configuration
+# =============================================================================
+
+# Report configuration
+reports:
+  # Generate executive summary
+  executive-summary: true
+  
+  # Include recommendations
+  include-recommendations: true
+  
+  # Include severity distribution
+  severity-distribution: true
+  
+  # Include trend analysis (if baseline exists)
+  trend-analysis: true
+
+# =============================================================================
+# Notification Configuration
+# =============================================================================
+
+# Notification settings for critical findings
+notifications:
+  # Slack webhook for critical findings
+  slack:
+    enabled: false
+    webhook-url: "${SLACK_WEBHOOK_URL}"
+    channel: "#security-alerts"
+    template: |
+      🚨 *Critical Security Finding*
+      *Rule*: {{ .Rule.ID }}
+      *Description*: {{ .Rule.Description }}
+      *File*: {{ .Location.Filename }}:{{ .Location.StartLine }}
+      *Severity*: {{ .Severity }}
+  
+  # Email notifications
+  email:
+    enabled: false
+    recipients:
+      - security@company.com
+      - devops@company.com
+    smtp-server: smtp.company.com
+    smtp-port: 587
+
+# =============================================================================
+# Environment-Specific Configuration
+# =============================================================================
+
+# Environment-specific rule configurations
+environments:
+  dev:
+    # Relaxed rules for development
+    exclude-checks:
+      - aws-s3-enable-bucket-logging
+      - aws-rds-encrypt-instance-storage-data
+      - aws-vpc-no-public-egress-sgr
+    minimum-severity: HIGH
+    
+  staging:
+    # Standard rules for staging
+    exclude-checks:
+      - aws-s3-enable-versioning
+    minimum-severity: MEDIUM
+    
+  prod:
+    # Strict rules for production
+    exclude-checks: []
+    minimum-severity: LOW
+    require-all-checks: true

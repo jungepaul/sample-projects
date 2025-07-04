@@ -1,0 +1,396 @@
+# Atlantis Configuration for GitOps Infrastructure Management
+# This file configures Atlantis to manage Terraform workflows via pull requests
+
+version: 3
+
+# Global settings
+automerge: false
+delete_source_branch_on_merge: true
+silence_fork_pr_errors: false
+
+# =============================================================================
+# Project Configuration
+# =============================================================================
+projects:
+- name: infrastructure-dev
+  dir: examples/environments/dev
+  workspace: dev
+  terraform_version: v1.6.0
+  delete_source_branch_on_merge: true
+  
+  # Custom workflow for development environment
+  workflow: infrastructure-dev
+  
+  # Auto-plan when these files change
+  autoplan:
+    when_modified: ["*.tf", "*.tfvars", "../../modules/**/*.tf"]
+    enabled: true
+  
+  # Branch restrictions
+  branch: /.*/
+  
+  # Plan requirements
+  plan_requirements: [approved, mergeable]
+  
+  # Apply requirements
+  apply_requirements: [approved, mergeable]
+
+- name: infrastructure-staging
+  dir: examples/environments/staging
+  workspace: staging
+  terraform_version: v1.6.0
+  delete_source_branch_on_merge: true
+  
+  workflow: infrastructure-staging
+  
+  autoplan:
+    when_modified: ["*.tf", "*.tfvars", "../../modules/**/*.tf"]
+    enabled: true
+  
+  # Staging requires specific branch
+  branch: /^(main|release\/.*)$/
+  
+  plan_requirements: [approved, mergeable]
+  apply_requirements: [approved, mergeable]
+
+- name: infrastructure-prod
+  dir: examples/environments/prod
+  workspace: prod
+  terraform_version: v1.6.0
+  delete_source_branch_on_merge: true
+  
+  workflow: infrastructure-prod
+  
+  autoplan:
+    when_modified: ["*.tf", "*.tfvars", "../../modules/**/*.tf"]
+    enabled: true
+  
+  # Production only from main branch
+  branch: /^main$/
+  
+  # Stricter requirements for production
+  plan_requirements: [approved, mergeable]
+  apply_requirements: [approved, mergeable]
+
+# =============================================================================
+# Custom Workflows
+# =============================================================================
+workflows:
+  infrastructure-dev:
+    plan:
+      steps:
+      # Pre-plan security scanning
+      - run: |
+          echo "🔍 Running security scans for development environment..."
+          
+          # Install security tools
+          curl -s https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
+          pip3 install checkov
+          
+          # Run TFSec
+          echo "Running TFSec security scan..."
+          tfsec . --format json --out tfsec-results.json --soft-fail || true
+          
+          # Run Checkov
+          echo "Running Checkov compliance scan..."
+          checkov -f main.tf --framework terraform --soft-fail || true
+          
+          echo "✅ Security scans completed"
+      
+      # Standard Terraform operations
+      - env:
+          name: TF_VAR_environment
+          value: dev
+      - init
+      - plan:
+          extra_args: ["-var-file=terraform.tfvars"]
+      
+      # Post-plan cost estimation
+      - run: |
+          if [ ! -z "$INFRACOST_API_KEY" ]; then
+            echo "💰 Generating cost estimate..."
+            curl -fsSL https://raw.githubusercontent.com/infracost/infracost/master/scripts/install.sh | sh
+            infracost breakdown --path . --format table
+          else
+            echo "ℹ️ Skipping cost estimation (INFRACOST_API_KEY not set)"
+          fi
+
+    apply:
+      steps:
+      - env:
+          name: TF_VAR_environment
+          value: dev
+      - apply
+      
+      # Post-apply validation
+      - run: |
+          echo "🧪 Running post-deployment validation..."
+          
+          # Validate critical resources exist
+          terraform output -json > outputs.json
+          
+          if [ -f "../../scripts/validate-deployment.sh" ]; then
+            chmod +x ../../scripts/validate-deployment.sh
+            ../../scripts/validate-deployment.sh dev
+          fi
+          
+          echo "✅ Post-deployment validation completed"
+
+  infrastructure-staging:
+    plan:
+      steps:
+      # Enhanced security scanning for staging
+      - run: |
+          echo "🔍 Running enhanced security scans for staging environment..."
+          
+          # Install security tools
+          curl -s https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
+          pip3 install checkov
+          
+          # Install Conftest for OPA policies
+          wget https://github.com/open-policy-agent/conftest/releases/download/v0.46.0/conftest_0.46.0_Linux_x86_64.tar.gz
+          tar xzf conftest_0.46.0_Linux_x86_64.tar.gz
+          chmod +x conftest
+          
+          # Run comprehensive security scans
+          tfsec . --format json --out tfsec-results.json --soft-fail || true
+          checkov -f main.tf --framework terraform --soft-fail || true
+          
+          # Run OPA policies if they exist
+          if [ -d "../../policies/opa" ]; then
+            ./conftest test --policy ../../policies/opa *.tf || true
+          fi
+          
+          echo "✅ Enhanced security scans completed"
+      
+      - env:
+          name: TF_VAR_environment
+          value: staging
+      - init
+      - plan:
+          extra_args: ["-var-file=terraform.tfvars"]
+      
+      # Cost estimation and approval workflow
+      - run: |
+          if [ ! -z "$INFRACOST_API_KEY" ]; then
+            echo "💰 Generating detailed cost estimate..."
+            curl -fsSL https://raw.githubusercontent.com/infracost/infracost/master/scripts/install.sh | sh
+            infracost breakdown --path . --format table
+            infracost breakdown --path . --format json --out infracost.json
+            
+            # Check if cost increase is significant
+            if [ -f "infracost.json" ]; then
+              MONTHLY_COST=$(jq -r '.totalMonthlyCost // 0' infracost.json)
+              echo "📊 Estimated monthly cost: \$${MONTHLY_COST}"
+              
+              # Warn if cost is high
+              if (( $(echo "$MONTHLY_COST > 1000" | bc -l) )); then
+                echo "⚠️ WARNING: Monthly cost exceeds \$1000"
+              fi
+            fi
+          fi
+
+    apply:
+      steps:
+      - env:
+          name: TF_VAR_environment
+          value: staging
+      - apply
+      
+      # Comprehensive post-apply validation
+      - run: |
+          echo "🧪 Running comprehensive post-deployment validation..."
+          
+          terraform output -json > outputs.json
+          
+          # Run validation scripts
+          if [ -f "../../scripts/validate-deployment.sh" ]; then
+            chmod +x ../../scripts/validate-deployment.sh
+            ../../scripts/validate-deployment.sh staging
+          fi
+          
+          # Check resource health
+          if [ -f "../../scripts/health-check.sh" ]; then
+            chmod +x ../../scripts/health-check.sh
+            ../../scripts/health-check.sh staging
+          fi
+          
+          echo "✅ Comprehensive validation completed"
+
+  infrastructure-prod:
+    plan:
+      steps:
+      # Comprehensive pre-production checks
+      - run: |
+          echo "🚨 Running comprehensive pre-production security and compliance checks..."
+          
+          # Install all security tools
+          curl -s https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
+          pip3 install checkov
+          
+          # Install Conftest
+          wget https://github.com/open-policy-agent/conftest/releases/download/v0.46.0/conftest_0.46.0_Linux_x86_64.tar.gz
+          tar xzf conftest_0.46.0_Linux_x86_64.tar.gz
+          chmod +x conftest
+          
+          # Run all security scans
+          echo "Running TFSec..."
+          tfsec . --format json --out tfsec-results.json
+          
+          echo "Running Checkov..."
+          checkov -f main.tf --framework terraform
+          
+          # Run OPA policies (required for production)
+          if [ -d "../../policies/opa" ]; then
+            echo "Running OPA policy validation..."
+            ./conftest test --policy ../../policies/opa *.tf
+          else
+            echo "❌ ERROR: OPA policies not found - required for production"
+            exit 1
+          fi
+          
+          echo "✅ All security and compliance checks passed"
+      
+      # Backup check
+      - run: |
+          echo "🗄️ Verifying backup and disaster recovery procedures..."
+          
+          # Check if backup configurations exist
+          if ! grep -q "backup" *.tf; then
+            echo "⚠️ WARNING: No backup configurations detected in Terraform files"
+          fi
+          
+          # Verify DR procedures exist
+          if [ ! -f "../../docs/disaster-recovery.md" ]; then
+            echo "⚠️ WARNING: Disaster recovery documentation not found"
+          fi
+          
+          echo "✅ Backup verification completed"
+      
+      - env:
+          name: TF_VAR_environment
+          value: prod
+      - init
+      - plan:
+          extra_args: ["-var-file=terraform.tfvars"]
+      
+      # Production cost analysis
+      - run: |
+          if [ ! -z "$INFRACOST_API_KEY" ]; then
+            echo "💰 Generating production cost analysis..."
+            curl -fsSL https://raw.githubusercontent.com/infracost/infracost/master/scripts/install.sh | sh
+            infracost breakdown --path . --format table
+            infracost breakdown --path . --format json --out infracost.json
+            
+            # Detailed cost analysis for production
+            if [ -f "infracost.json" ]; then
+              MONTHLY_COST=$(jq -r '.totalMonthlyCost // 0' infracost.json)
+              echo "📊 Production estimated monthly cost: \$${MONTHLY_COST}"
+              
+              # Generate cost breakdown
+              infracost breakdown --path . --format html --out cost-report.html
+              echo "📈 Detailed cost report generated: cost-report.html"
+            fi
+          else
+            echo "❌ ERROR: INFRACOST_API_KEY required for production deployments"
+            exit 1
+          fi
+
+    apply:
+      steps:
+      # Pre-apply final confirmation
+      - run: |
+          echo "🚨 PRODUCTION DEPLOYMENT STARTING"
+          echo "⏰ Timestamp: $(date -u)"
+          echo "👤 Triggered by: $ATLANTIS_USER_NAME"
+          echo "🔧 Terraform version: $(terraform version -json | jq -r '.terraform_version')"
+      
+      - env:
+          name: TF_VAR_environment
+          value: prod
+      - apply
+      
+      # Comprehensive post-production validation
+      - run: |
+          echo "🧪 Running production post-deployment validation..."
+          
+          terraform output -json > outputs.json
+          
+          # Critical resource validation
+          if [ -f "../../scripts/validate-deployment.sh" ]; then
+            chmod +x ../../scripts/validate-deployment.sh
+            ../../scripts/validate-deployment.sh prod
+          fi
+          
+          # Health checks
+          if [ -f "../../scripts/health-check.sh" ]; then
+            chmod +x ../../scripts/health-check.sh
+            ../../scripts/health-check.sh prod
+          fi
+          
+          # Security posture check
+          if [ -f "../../scripts/security-check.sh" ]; then
+            chmod +x ../../scripts/security-check.sh
+            ../../scripts/security-check.sh prod
+          fi
+          
+          echo "✅ Production deployment validation completed"
+      
+      # Post-deployment notification
+      - run: |
+          echo "📢 Production deployment completed successfully"
+          echo "🌐 Environment: Production"
+          echo "⏰ Completion time: $(date -u)"
+          echo "📊 View resources: https://console.aws.amazon.com/"
+          
+          # Send notification if webhook is configured
+          if [ ! -z "$SLACK_WEBHOOK_URL" ]; then
+            curl -X POST -H 'Content-type: application/json' \
+              --data '{"text":"🚀 Production infrastructure deployment completed successfully"}' \
+              $SLACK_WEBHOOK_URL
+          fi
+
+# =============================================================================
+# Policy Configuration
+# =============================================================================
+policies:
+  policy_check:
+    enabled: true
+    
+  conftest_check:
+    enabled: true
+    
+  owners:
+    enabled: true
+    owners_file: .github/CODEOWNERS
+
+# =============================================================================
+# Allowed Overrides
+# =============================================================================
+allowed_overrides: [apply_requirements, workflow]
+
+# =============================================================================
+# Parallel Operations
+# =============================================================================
+parallel_plan: true
+parallel_apply: false  # Safer for infrastructure
+
+# =============================================================================
+# Repo Locking
+# =============================================================================
+# Disable auto unlock (manual unlock required for failed applies)
+disable_apply_all: false
+
+# =============================================================================
+# Logging
+# =============================================================================
+log_level: info
+
+# =============================================================================
+# WebUI Configuration
+# =============================================================================
+# Custom footer for Atlantis UI
+ui:
+  footer: |
+    <p>Infrastructure as Code Framework - Managed by Atlantis</p>
+    <p>Need help? Check the <a href="/docs/infrastructure.md">Infrastructure Documentation</a></p>

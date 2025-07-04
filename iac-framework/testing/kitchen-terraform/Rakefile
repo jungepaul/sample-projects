@@ -1,0 +1,371 @@
+# Rakefile for Kitchen-Terraform testing tasks
+
+require 'kitchen'
+require 'kitchen/rake_tasks'
+require 'rspec/core/rake_task'
+require 'rubocop/rake_task'
+
+# Kitchen tasks
+Kitchen::RakeTasks.new
+
+# RSpec tasks
+RSpec::Core::RakeTask.new(:spec) do |t|
+  t.pattern = 'test/unit/**/*_spec.rb'
+  t.rspec_opts = '--format documentation --color'
+end
+
+# RuboCop tasks
+RuboCop::RakeTask.new(:rubocop) do |task|
+  task.patterns = ['test/**/*.rb', 'Rakefile']
+  task.formatters = ['simple']
+  task.fail_on_error = true
+end
+
+# Default task
+task default: [:lint, :spec]
+
+# Linting task
+task :lint do
+  puts 'Running RuboCop linting...'
+  Rake::Task[:rubocop].invoke
+end
+
+# Clean task
+task :clean do
+  puts 'Cleaning up test artifacts...'
+  
+  # Clean Kitchen artifacts
+  sh 'kitchen destroy all' do |ok, res|
+    puts ok ? 'Kitchen cleanup completed' : 'Kitchen cleanup failed'
+  end
+  
+  # Clean test reports
+  FileUtils.rm_rf('test/reports') if Dir.exist?('test/reports')
+  
+  # Clean coverage reports
+  FileUtils.rm_f('coverage.html')
+  FileUtils.rm_f('.coverage')
+end
+
+# Setup task
+task :setup do
+  puts 'Setting up test environment...'
+  
+  # Check dependencies
+  check_dependencies
+  
+  # Install gems
+  sh 'bundle install'
+  
+  # Create directories
+  create_directories
+  
+  puts 'Setup completed!'
+end
+
+# Test all suites
+task :test_all do
+  puts 'Running all test suites...'
+  
+  suites = %w[
+    vpc-basic
+    vpc-advanced
+    ec2-basic
+    ec2-advanced
+    security-groups
+    iam-roles
+  ]
+  
+  suites.each do |suite|
+    puts "Testing suite: #{suite}"
+    sh "kitchen test #{suite}"
+  end
+end
+
+# Test VPC suites only
+task :test_vpc do
+  puts 'Running VPC test suites...'
+  
+  vpc_suites = %w[vpc-basic vpc-advanced]
+  
+  vpc_suites.each do |suite|
+    puts "Testing VPC suite: #{suite}"
+    sh "kitchen test #{suite}"
+  end
+end
+
+# Test EC2 suites only
+task :test_ec2 do
+  puts 'Running EC2 test suites...'
+  
+  ec2_suites = %w[ec2-basic ec2-advanced]
+  
+  ec2_suites.each do |suite|
+    puts "Testing EC2 suite: #{suite}"
+    sh "kitchen test #{suite}"
+  end
+end
+
+# Parallel testing
+task :test_parallel do
+  puts 'Running tests in parallel...'
+  
+  require 'parallel'
+  
+  suites = %w[
+    vpc-basic
+    ec2-basic
+    security-groups
+  ]
+  
+  results = Parallel.map(suites, in_processes: 3) do |suite|
+    puts "Testing suite #{suite} in parallel..."
+    system("kitchen test #{suite}")
+  end
+  
+  if results.all?
+    puts 'All parallel tests passed!'
+  else
+    puts 'Some parallel tests failed!'
+    exit 1
+  end
+end
+
+# Convergence only (no destroy)
+task :converge_all do
+  puts 'Converging all test suites...'
+  
+  sh 'kitchen converge all'
+end
+
+# Verify only (assumes infrastructure is already converged)
+task :verify_all do
+  puts 'Verifying all test suites...'
+  
+  sh 'kitchen verify all'
+end
+
+# Generate test reports
+task :reports do
+  puts 'Generating test reports...'
+  
+  # Create reports directory
+  FileUtils.mkdir_p('test/reports')
+  
+  # Run tests with JUnit output
+  ENV['KITCHEN_JUNIT_OUTPUT'] = 'test/reports/junit.xml'
+  
+  sh 'kitchen test all --log-level=info' do |ok, res|
+    puts ok ? 'Test reports generated' : 'Test report generation failed'
+  end
+end
+
+# Security scan
+task :security do
+  puts 'Running security scans...'
+  
+  # Check for hardcoded secrets
+  check_secrets
+  
+  # Run bundler audit
+  sh 'bundle audit check --update' do |ok, res|
+    puts ok ? 'Bundle audit passed' : 'Bundle audit found vulnerabilities'
+  end
+end
+
+# Validate Terraform modules
+task :validate_terraform do
+  puts 'Validating Terraform modules...'
+  
+  modules_dir = '../../modules/aws'
+  
+  Dir.glob("#{modules_dir}/*/").each do |module_path|
+    puts "Validating module: #{module_path}"
+    
+    Dir.chdir(module_path) do
+      sh 'terraform init -backend=false'
+      sh 'terraform validate'
+    end
+  end
+end
+
+# Cost estimation
+task :cost_estimate do
+  puts 'Generating cost estimates...'
+  
+  # This would integrate with Infracost or similar tools
+  sh 'infracost breakdown --path ../../modules/aws' do |ok, res|
+    puts ok ? 'Cost estimate generated' : 'Cost estimation failed (infracost not available?)'
+  end
+end
+
+# Performance testing
+task :performance do
+  puts 'Running performance tests...'
+  
+  # This could include load testing, response time testing, etc.
+  # For now, just run basic convergence timing
+  
+  start_time = Time.now
+  sh 'kitchen converge vpc-basic'
+  end_time = Time.now
+  
+  duration = end_time - start_time
+  puts "VPC convergence took #{duration.round(2)} seconds"
+  
+  if duration > 300  # 5 minutes
+    puts 'WARNING: Convergence took longer than expected'
+  end
+end
+
+# Documentation generation
+task :docs do
+  puts 'Generating documentation...'
+  
+  # Generate InSpec documentation
+  sh 'inspec docs test/integration' do |ok, res|
+    puts ok ? 'InSpec docs generated' : 'InSpec docs generation failed'
+  end
+  
+  # Generate test coverage reports
+  sh 'kitchen test all --coverage' do |ok, res|
+    puts ok ? 'Coverage reports generated' : 'Coverage report generation failed'
+  end
+end
+
+# Check AWS credentials and permissions
+task :check_aws do
+  puts 'Checking AWS credentials and permissions...'
+  
+  # Check credentials
+  sh 'aws sts get-caller-identity' do |ok, res|
+    puts ok ? 'AWS credentials are valid' : 'AWS credentials are invalid'
+    exit 1 unless ok
+  end
+  
+  # Check basic permissions
+  required_permissions = [
+    'ec2:DescribeInstances',
+    'ec2:DescribeVpcs',
+    'ec2:DescribeSubnets',
+    'iam:ListRoles'
+  ]
+  
+  puts 'Note: Manual verification of permissions required:'
+  required_permissions.each { |perm| puts "  - #{perm}" }
+end
+
+# Continuous integration task
+task :ci do
+  puts 'Running CI pipeline...'
+  
+  Rake::Task[:check_aws].invoke
+  Rake::Task[:lint].invoke
+  Rake::Task[:security].invoke
+  Rake::Task[:validate_terraform].invoke
+  Rake::Task[:test_all].invoke
+  Rake::Task[:reports].invoke
+  
+  puts 'CI pipeline completed successfully!'
+end
+
+# Helper methods
+def check_dependencies
+  puts 'Checking dependencies...'
+  
+  required_commands = %w[terraform aws kitchen inspec]
+  
+  required_commands.each do |cmd|
+    unless system("which #{cmd} > /dev/null 2>&1")
+      puts "ERROR: #{cmd} is not installed or not in PATH"
+      exit 1
+    end
+  end
+  
+  puts 'All dependencies are available'
+end
+
+def create_directories
+  directories = %w[
+    test/reports
+    test/unit
+    test/fixtures/vpc
+    test/fixtures/ec2
+  ]
+  
+  directories.each do |dir|
+    FileUtils.mkdir_p(dir) unless Dir.exist?(dir)
+  end
+end
+
+def check_secrets
+  puts 'Checking for hardcoded secrets...'
+  
+  # Simple pattern matching for common secrets
+  secret_patterns = [
+    /aws_access_key_id\s*=\s*["\'][A-Z0-9]{20}["\']/, 
+    /aws_secret_access_key\s*=\s*["\'][A-Za-z0-9+\/]{40}["\']/, 
+    /password\s*=\s*["\'][^"\']{8,}["\']/, 
+    /api_key\s*=\s*["\'][A-Za-z0-9]{20,}["\']/ 
+  ]
+  
+  Dir.glob('test/**/*.rb').each do |file|
+    content = File.read(file)
+    
+    secret_patterns.each do |pattern|
+      if content.match?(pattern)
+        puts "WARNING: Potential secret found in #{file}"
+      end
+    end
+  end
+  
+  puts 'Secret scan completed'
+end
+
+# Custom tasks for specific test scenarios
+namespace :test do
+  desc 'Test disaster recovery scenarios'
+  task :disaster_recovery do
+    puts 'Running disaster recovery tests...'
+    sh 'kitchen test disaster-recovery'
+  end
+  
+  desc 'Test security compliance'
+  task :security_compliance do
+    puts 'Running security compliance tests...'
+    sh 'kitchen test security-compliance'
+  end
+  
+  desc 'Test cost optimization'
+  task :cost_optimization do
+    puts 'Running cost optimization tests...'
+    sh 'kitchen test cost-optimization'
+  end
+  
+  desc 'Test production-like environment'
+  task :production do
+    puts 'Running production-like environment tests...'
+    sh 'kitchen test prod-like'
+  end
+end
+
+# Development helpers
+namespace :dev do
+  desc 'Start development environment'
+  task :start do
+    puts 'Starting development environment...'
+    sh 'kitchen converge vpc-basic ec2-basic'
+  end
+  
+  desc 'Stop development environment'
+  task :stop do
+    puts 'Stopping development environment...'
+    sh 'kitchen destroy vpc-basic ec2-basic'
+  end
+  
+  desc 'Reset development environment'
+  task :reset do
+    Rake::Task['dev:stop'].invoke
+    Rake::Task['dev:start'].invoke
+  end
+end
