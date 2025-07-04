@@ -1,0 +1,308 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: model-registry-config
+  namespace: mlflow
+data:
+  registry.conf: |
+    # MLflow Model Registry Configuration
+    
+    # Model stages configuration
+    model_stages:
+      - None
+      - Staging
+      - Production
+      - Archived
+    
+    # Model transition policies
+    transition_policies:
+      to_staging:
+        required_approvers: 1
+        auto_approve_conditions:
+          - metric: accuracy
+            threshold: 0.85
+            operator: ">="
+          - metric: precision
+            threshold: 0.80
+            operator: ">="
+      to_production:
+        required_approvers: 2
+        auto_approve_conditions:
+          - metric: accuracy
+            threshold: 0.90
+            operator: ">="
+          - metric: precision
+            threshold: 0.85
+            operator: ">="
+          - metric: recall
+            threshold: 0.85
+            operator: ">="
+    
+    # Model lifecycle hooks
+    lifecycle_hooks:
+      on_stage_transition:
+        staging:
+          - webhook: "http://model-validator:8080/validate"
+          - notification: "slack://ml-team"
+        production:
+          - webhook: "http://deployment-service:8080/deploy"
+          - notification: "slack://ops-team"
+          - audit_log: "enabled"
+    
+    # Model versioning
+    versioning:
+      scheme: "semantic"  # semantic, timestamp, sequential
+      auto_increment: true
+      retention_policy:
+        max_versions_per_model: 10
+        archive_after_days: 365
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: model-registry-init
+  namespace: mlflow
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: registry-init
+        image: python:3.9-slim
+        command:
+        - /bin/bash
+        - -c
+        - |
+          pip install mlflow==2.8.1 psycopg2-binary
+          
+          # Wait for MLflow server to be ready
+          until curl -f http://mlflow-server:5000/health; do
+            echo "Waiting for MLflow server..."
+            sleep 5
+          done
+          
+          python << 'EOF'
+          import mlflow
+          from mlflow.tracking import MlflowClient
+          
+          # Configure MLflow client
+          mlflow.set_tracking_uri("http://mlflow-server:5000")
+          client = MlflowClient()
+          
+          # Create default experiments
+          experiments = [
+              "model-training",
+              "hyperparameter-tuning", 
+              "model-validation",
+              "a-b-testing",
+              "production-monitoring"
+          ]
+          
+          for exp_name in experiments:
+              try:
+                  exp_id = client.create_experiment(exp_name)
+                  print(f"Created experiment: {exp_name} (ID: {exp_id})")
+              except Exception as e:
+                  print(f"Experiment {exp_name} already exists or error: {e}")
+          
+          # Create sample registered models for demo
+          sample_models = [
+              {
+                  "name": "customer-churn-predictor",
+                  "description": "ML model to predict customer churn probability"
+              },
+              {
+                  "name": "fraud-detection-model", 
+                  "description": "Real-time fraud detection model"
+              },
+              {
+                  "name": "recommendation-engine",
+                  "description": "Product recommendation model"
+              }
+          ]
+          
+          for model_info in sample_models:
+              try:
+                  registered_model = client.create_registered_model(
+                      model_info["name"],
+                      description=model_info["description"]
+                  )
+                  print(f"Created registered model: {model_info['name']}")
+              except Exception as e:
+                  print(f"Model {model_info['name']} already exists or error: {e}")
+          
+          print("Model registry initialization completed!")
+          EOF
+        env:
+        - name: MLFLOW_TRACKING_URI
+          value: "http://mlflow-server:5000"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: model-lifecycle-scripts
+  namespace: mlflow
+data:
+  promote_model.py: |
+    #!/usr/bin/env python3
+    """
+    Script to promote models between stages based on metrics and approval
+    """
+    import argparse
+    import json
+    import mlflow
+    from mlflow.tracking import MlflowClient
+    
+    def promote_model(model_name, version, target_stage, force=False):
+        """Promote model to target stage with validation"""
+        client = MlflowClient()
+        
+        # Get model version details
+        model_version = client.get_model_version(model_name, version)
+        current_stage = model_version.current_stage
+        
+        print(f"Promoting {model_name} v{version} from {current_stage} to {target_stage}")
+        
+        # Load promotion policies (would be from config in real implementation)
+        policies = {
+            "Staging": {"accuracy": 0.85, "precision": 0.80},
+            "Production": {"accuracy": 0.90, "precision": 0.85, "recall": 0.85}
+        }
+        
+        if not force and target_stage in policies:
+            # Get latest run metrics for this model version
+            runs = client.search_runs(
+                experiment_ids=["1"],  # Default experiment
+                filter_string=f"tags.mlflow.source.name = '{model_name}'"
+            )
+            
+            if runs:
+                latest_run = runs[0]
+                metrics = latest_run.data.metrics
+                
+                # Check if metrics meet promotion criteria
+                required_metrics = policies[target_stage]
+                for metric_name, threshold in required_metrics.items():
+                    if metric_name not in metrics:
+                        print(f"ERROR: Required metric '{metric_name}' not found")
+                        return False
+                    
+                    if metrics[metric_name] < threshold:
+                        print(f"ERROR: {metric_name} ({metrics[metric_name]}) < threshold ({threshold})")
+                        return False
+                
+                print("All metric thresholds passed")
+        
+        # Perform the transition
+        try:
+            client.transition_model_version_stage(
+                name=model_name,
+                version=version,
+                stage=target_stage,
+                archive_existing_versions=True
+            )
+            print(f"Successfully promoted {model_name} v{version} to {target_stage}")
+            return True
+        except Exception as e:
+            print(f"ERROR: Failed to promote model: {e}")
+            return False
+    
+    if __name__ == "__main__":
+        parser = argparse.ArgumentParser(description="Promote MLflow model")
+        parser.add_argument("--model-name", required=True, help="Model name")
+        parser.add_argument("--version", required=True, help="Model version") 
+        parser.add_argument("--stage", required=True, choices=["Staging", "Production", "Archived"])
+        parser.add_argument("--force", action="store_true", help="Skip metric validation")
+        
+        args = parser.parse_args()
+        
+        mlflow.set_tracking_uri("http://mlflow-server:5000")
+        success = promote_model(args.model_name, args.version, args.stage, args.force)
+        exit(0 if success else 1)
+  
+  cleanup_models.py: |
+    #!/usr/bin/env python3
+    """
+    Script to cleanup old model versions based on retention policy
+    """
+    import mlflow
+    from mlflow.tracking import MlflowClient
+    from datetime import datetime, timedelta
+    
+    def cleanup_old_models(retention_days=365, max_versions=10):
+        """Remove old model versions based on retention policy"""
+        client = MlflowClient()
+        
+        # Get all registered models
+        registered_models = client.search_registered_models()
+        
+        for rm in registered_models:
+            model_name = rm.name
+            print(f"Processing model: {model_name}")
+            
+            # Get all versions for this model
+            model_versions = client.search_model_versions(f"name='{model_name}'")
+            
+            # Sort by creation time (newest first)
+            model_versions.sort(key=lambda x: x.creation_timestamp, reverse=True)
+            
+            # Keep max_versions newest versions
+            versions_to_keep = model_versions[:max_versions]
+            versions_to_check = model_versions[max_versions:]
+            
+            # Check age-based retention for older versions
+            cutoff_date = datetime.now() - timedelta(days=retention_days)
+            
+            for version in versions_to_check:
+                creation_time = datetime.fromtimestamp(version.creation_timestamp / 1000)
+                
+                # Only delete if older than retention period and not in Production
+                if (creation_time < cutoff_date and 
+                    version.current_stage not in ["Production", "Staging"]):
+                    
+                    try:
+                        client.delete_model_version(model_name, version.version)
+                        print(f"Deleted {model_name} v{version.version} (created: {creation_time})")
+                    except Exception as e:
+                        print(f"Failed to delete {model_name} v{version.version}: {e}")
+    
+    if __name__ == "__main__":
+        mlflow.set_tracking_uri("http://mlflow-server:5000")
+        cleanup_old_models()
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: model-cleanup
+  namespace: mlflow
+spec:
+  schedule: "0 2 * * 0"  # Weekly at 2 AM on Sunday
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+          - name: model-cleanup
+            image: python:3.9-slim
+            command:
+            - /bin/bash
+            - -c
+            - |
+              pip install mlflow==2.8.1
+              python /scripts/cleanup_models.py
+            env:
+            - name: MLFLOW_TRACKING_URI
+              value: "http://mlflow-server:5000"
+            volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+          volumes:
+          - name: scripts
+            configMap:
+              name: model-lifecycle-scripts
+              defaultMode: 0755

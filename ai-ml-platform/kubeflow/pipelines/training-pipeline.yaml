@@ -1,0 +1,414 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: ml-training-pipeline-
+  annotations:
+    pipelines.kubeflow.org/kfp_sdk_version: 1.8.22
+    pipelines.kubeflow.org/pipeline_compilation_time: '2024-01-01T00:00:00'
+    pipelines.kubeflow.org/pipeline_spec: |
+      {
+        "description": "Machine Learning Training Pipeline",
+        "inputs": [
+          {
+            "name": "dataset_path",
+            "type": "String",
+            "description": "Path to the training dataset"
+          },
+          {
+            "name": "model_type",
+            "type": "String", 
+            "description": "Type of model to train (sklearn, tensorflow, pytorch)"
+          },
+          {
+            "name": "hyperparameters",
+            "type": "String",
+            "description": "JSON string of hyperparameters"
+          }
+        ],
+        "name": "ml-training-pipeline"
+      }
+spec:
+  entrypoint: ml-training-pipeline
+  arguments:
+    parameters:
+    - name: dataset_path
+      value: "s3://datasets/sample-dataset"
+    - name: model_type
+      value: "sklearn"
+    - name: hyperparameters
+      value: '{"learning_rate": 0.01, "n_estimators": 100}'
+  templates:
+  - name: ml-training-pipeline
+    dag:
+      tasks:
+      - name: data-validation
+        template: data-validation
+        arguments:
+          parameters:
+          - name: dataset_path
+            value: "{{workflow.parameters.dataset_path}}"
+      - name: data-preprocessing
+        template: data-preprocessing
+        dependencies: [data-validation]
+        arguments:
+          parameters:
+          - name: dataset_path
+            value: "{{workflow.parameters.dataset_path}}"
+      - name: model-training
+        template: model-training
+        dependencies: [data-preprocessing]
+        arguments:
+          parameters:
+          - name: preprocessed_data_path
+            value: "{{tasks.data-preprocessing.outputs.parameters.output_path}}"
+          - name: model_type
+            value: "{{workflow.parameters.model_type}}"
+          - name: hyperparameters
+            value: "{{workflow.parameters.hyperparameters}}"
+      - name: model-evaluation
+        template: model-evaluation
+        dependencies: [model-training]
+        arguments:
+          parameters:
+          - name: model_path
+            value: "{{tasks.model-training.outputs.parameters.model_path}}"
+          - name: test_data_path
+            value: "{{tasks.data-preprocessing.outputs.parameters.test_data_path}}"
+      - name: model-registration
+        template: model-registration
+        dependencies: [model-evaluation]
+        arguments:
+          parameters:
+          - name: model_path
+            value: "{{tasks.model-training.outputs.parameters.model_path}}"
+          - name: metrics
+            value: "{{tasks.model-evaluation.outputs.parameters.metrics}}"
+          - name: model_type
+            value: "{{workflow.parameters.model_type}}"
+
+  - name: data-validation
+    container:
+      image: python:3.9-slim
+      command: [python]
+      args: 
+      - -c
+      - |
+        import json
+        import os
+        import boto3
+        from pathlib import Path
+        
+        # Data validation logic
+        dataset_path = "{{inputs.parameters.dataset_path}}"
+        print(f"Validating dataset at: {dataset_path}")
+        
+        # Check if dataset exists and has valid format
+        # Add your validation logic here
+        
+        print("Data validation completed successfully")
+      
+      env:
+      - name: AWS_DEFAULT_REGION
+        value: "us-west-2"
+      
+      resources:
+        requests:
+          memory: "512Mi"
+          cpu: "250m"
+        limits:
+          memory: "1Gi"
+          cpu: "500m"
+    
+    inputs:
+      parameters:
+      - name: dataset_path
+
+  - name: data-preprocessing
+    container:
+      image: python:3.9-slim
+      command: [python]
+      args:
+      - -c
+      - |
+        import json
+        import os
+        import pandas as pd
+        from sklearn.model_selection import train_test_split
+        from sklearn.preprocessing import StandardScaler
+        import joblib
+        
+        # Data preprocessing logic
+        dataset_path = "{{inputs.parameters.dataset_path}}"
+        print(f"Preprocessing dataset from: {dataset_path}")
+        
+        # Load and preprocess data
+        # This is a placeholder - replace with actual preprocessing
+        output_path = "/tmp/preprocessed_data"
+        test_data_path = "/tmp/test_data"
+        
+        # Create output directories
+        os.makedirs(output_path, exist_ok=True)
+        os.makedirs(test_data_path, exist_ok=True)
+        
+        print(f"Preprocessed data saved to: {output_path}")
+        print(f"Test data saved to: {test_data_path}")
+        
+        # Output parameters
+        with open("/tmp/output_path.txt", "w") as f:
+            f.write(output_path)
+        with open("/tmp/test_data_path.txt", "w") as f:
+            f.write(test_data_path)
+      
+      env:
+      - name: AWS_DEFAULT_REGION
+        value: "us-west-2"
+      
+      resources:
+        requests:
+          memory: "1Gi"
+          cpu: "500m"
+        limits:
+          memory: "2Gi"
+          cpu: "1000m"
+    
+    inputs:
+      parameters:
+      - name: dataset_path
+    
+    outputs:
+      parameters:
+      - name: output_path
+        valueFrom:
+          path: /tmp/output_path.txt
+      - name: test_data_path
+        valueFrom:
+          path: /tmp/test_data_path.txt
+
+  - name: model-training
+    container:
+      image: tensorflow/tensorflow:2.13.0-gpu
+      command: [python]
+      args:
+      - -c
+      - |
+        import json
+        import os
+        import joblib
+        import mlflow
+        import mlflow.sklearn
+        from sklearn.ensemble import RandomForestClassifier
+        from sklearn.linear_model import LogisticRegression
+        
+        # Model training logic
+        preprocessed_data_path = "{{inputs.parameters.preprocessed_data_path}}"
+        model_type = "{{inputs.parameters.model_type}}"
+        hyperparameters = json.loads('{{inputs.parameters.hyperparameters}}')
+        
+        print(f"Training {model_type} model with hyperparameters: {hyperparameters}")
+        
+        # MLflow tracking
+        mlflow.set_tracking_uri("http://mlflow-server:5000")
+        mlflow.set_experiment("model-training")
+        
+        with mlflow.start_run():
+            # Log parameters
+            mlflow.log_params(hyperparameters)
+            
+            # Train model based on type
+            if model_type == "sklearn":
+                model = RandomForestClassifier(**hyperparameters)
+            else:
+                model = LogisticRegression(**hyperparameters)
+            
+            # Placeholder training - replace with actual training logic
+            # model.fit(X_train, y_train)
+            
+            # Save model
+            model_path = "/tmp/model"
+            os.makedirs(model_path, exist_ok=True)
+            joblib.dump(model, f"{model_path}/model.pkl")
+            
+            # Log model
+            mlflow.sklearn.log_model(model, "model")
+            
+            print(f"Model saved to: {model_path}")
+            
+            # Output model path
+            with open("/tmp/model_path.txt", "w") as f:
+                f.write(model_path)
+      
+      env:
+      - name: AWS_DEFAULT_REGION
+        value: "us-west-2"
+      
+      resources:
+        requests:
+          memory: "2Gi"
+          cpu: "1000m"
+        limits:
+          memory: "4Gi"
+          cpu: "2000m"
+    
+    inputs:
+      parameters:
+      - name: preprocessed_data_path
+      - name: model_type
+      - name: hyperparameters
+    
+    outputs:
+      parameters:
+      - name: model_path
+        valueFrom:
+          path: /tmp/model_path.txt
+    
+    nodeSelector:
+      workload: ml-training
+    
+    tolerations:
+    - key: ml-training
+      value: "true"
+      effect: NoSchedule
+
+  - name: model-evaluation
+    container:
+      image: python:3.9-slim
+      command: [python]
+      args:
+      - -c
+      - |
+        import json
+        import os
+        import joblib
+        import mlflow
+        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+        
+        # Model evaluation logic
+        model_path = "{{inputs.parameters.model_path}}"
+        test_data_path = "{{inputs.parameters.test_data_path}}"
+        
+        print(f"Evaluating model from: {model_path}")
+        
+        # Load model
+        model = joblib.load(f"{model_path}/model.pkl")
+        
+        # Placeholder evaluation - replace with actual evaluation logic
+        # predictions = model.predict(X_test)
+        # metrics = {
+        #     "accuracy": accuracy_score(y_test, predictions),
+        #     "precision": precision_score(y_test, predictions, average='weighted'),
+        #     "recall": recall_score(y_test, predictions, average='weighted'),
+        #     "f1": f1_score(y_test, predictions, average='weighted')
+        # }
+        
+        # Placeholder metrics
+        metrics = {
+            "accuracy": 0.85,
+            "precision": 0.84,
+            "recall": 0.86,
+            "f1": 0.85
+        }
+        
+        print(f"Model evaluation metrics: {metrics}")
+        
+        # Log metrics to MLflow
+        mlflow.set_tracking_uri("http://mlflow-server:5000")
+        with mlflow.start_run():
+            mlflow.log_metrics(metrics)
+        
+        # Output metrics
+        with open("/tmp/metrics.json", "w") as f:
+            json.dump(metrics, f)
+      
+      env:
+      - name: AWS_DEFAULT_REGION
+        value: "us-west-2"
+      
+      resources:
+        requests:
+          memory: "1Gi"
+          cpu: "500m"
+        limits:
+          memory: "2Gi"
+          cpu: "1000m"
+    
+    inputs:
+      parameters:
+      - name: model_path
+      - name: test_data_path
+    
+    outputs:
+      parameters:
+      - name: metrics
+        valueFrom:
+          path: /tmp/metrics.json
+
+  - name: model-registration
+    container:
+      image: python:3.9-slim
+      command: [python]
+      args:
+      - -c
+      - |
+        import json
+        import os
+        import mlflow
+        from mlflow.tracking import MlflowClient
+        
+        # Model registration logic
+        model_path = "{{inputs.parameters.model_path}}"
+        metrics = json.loads('{{inputs.parameters.metrics}}')
+        model_type = "{{inputs.parameters.model_type}}"
+        
+        print(f"Registering model: {model_type}")
+        
+        # MLflow model registration
+        mlflow.set_tracking_uri("http://mlflow-server:5000")
+        client = MlflowClient()
+        
+        # Register model if metrics meet threshold
+        if metrics["accuracy"] > 0.8:
+            model_name = f"{model_type}-model"
+            
+            # Create registered model if it doesn't exist
+            try:
+                client.create_registered_model(model_name)
+            except Exception as e:
+                print(f"Model {model_name} already exists: {e}")
+            
+            # Register this version
+            model_version = client.create_model_version(
+                name=model_name,
+                source=f"file://{model_path}",
+                description=f"Model trained with metrics: {metrics}"
+            )
+            
+            print(f"Model registered as version {model_version.version}")
+            
+            # Transition to staging if accuracy is high enough
+            if metrics["accuracy"] > 0.85:
+                client.transition_model_version_stage(
+                    name=model_name,
+                    version=model_version.version,
+                    stage="Staging"
+                )
+                print("Model transitioned to Staging")
+        else:
+            print("Model metrics do not meet threshold for registration")
+      
+      env:
+      - name: AWS_DEFAULT_REGION
+        value: "us-west-2"
+      
+      resources:
+        requests:
+          memory: "512Mi"
+          cpu: "250m"
+        limits:
+          memory: "1Gi"
+          cpu: "500m"
+    
+    inputs:
+      parameters:
+      - name: model_path
+      - name: metrics
+      - name: model_type

@@ -1,0 +1,275 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: model-training-component
+  namespace: kubeflow
+spec:
+  entrypoint: model-training
+  templates:
+  - name: model-training
+    inputs:
+      parameters:
+      - name: training_data_path
+        description: "Path to training data"
+      - name: model_config
+        description: "JSON configuration for model training"
+        default: |
+          {
+            "model_type": "sklearn",
+            "algorithm": "random_forest",
+            "hyperparameters": {
+              "n_estimators": 100,
+              "max_depth": 10,
+              "random_state": 42
+            },
+            "validation_split": 0.2,
+            "cross_validation_folds": 5
+          }
+      - name: experiment_name
+        description: "MLflow experiment name"
+        default: "model-training-experiment"
+    outputs:
+      parameters:
+      - name: model_path
+        valueFrom:
+          path: /tmp/outputs/model_path.txt
+      - name: model_metrics
+        valueFrom:
+          path: /tmp/outputs/model_metrics.json
+      - name: mlflow_run_id
+        valueFrom:
+          path: /tmp/outputs/mlflow_run_id.txt
+      artifacts:
+      - name: trained-model
+        path: /tmp/model
+        s3:
+          endpoint: s3.amazonaws.com
+          bucket: "{{workflow.parameters.artifacts_bucket}}"
+          key: "models/{{workflow.name}}/model.pkl"
+          accessKeySecret:
+            name: s3-credentials
+            key: accessKey
+          secretKeySecret:
+            name: s3-credentials
+            key: secretKey
+    container:
+      image: tensorflow/tensorflow:2.13.0-gpu
+      command: [python]
+      args:
+      - -c
+      - |
+        import json
+        import os
+        import pickle
+        import numpy as np
+        import pandas as pd
+        from pathlib import Path
+        import mlflow
+        import mlflow.sklearn
+        import mlflow.tensorflow
+        import mlflow.pytorch
+        from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.svm import SVC
+        from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV
+        from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, roc_auc_score
+        import joblib
+        import warnings
+        warnings.filterwarnings('ignore')
+        
+        # Input parameters
+        training_data_path = "{{inputs.parameters.training_data_path}}"
+        config = json.loads('''{{inputs.parameters.model_config}}''')
+        experiment_name = "{{inputs.parameters.experiment_name}}"
+        
+        print(f"Starting model training...")
+        print(f"Training data: {training_data_path}")
+        print(f"Config: {json.dumps(config, indent=2)}")
+        print(f"Experiment: {experiment_name}")
+        
+        # Create output directories
+        os.makedirs("/tmp/outputs", exist_ok=True)
+        os.makedirs("/tmp/model", exist_ok=True)
+        
+        # Load training data (placeholder - replace with actual data loading)
+        # For demo, create sample data
+        np.random.seed(42)
+        n_samples = 1000
+        n_features = 10
+        
+        X = np.random.randn(n_samples, n_features)
+        y = np.random.randint(0, 2, n_samples)
+        
+        print(f"Loaded training data shape: X={X.shape}, y={y.shape}")
+        
+        # Split data
+        validation_split = config.get('validation_split', 0.2)
+        X_train, X_val, y_train, y_val = train_test_split(
+            X, y, test_size=validation_split, random_state=42, stratify=y
+        )
+        
+        print(f"Train shape: X={X_train.shape}, y={y_train.shape}")
+        print(f"Validation shape: X={X_val.shape}, y={y_val.shape}")
+        
+        # MLflow setup
+        mlflow.set_tracking_uri("http://mlflow-server:5000")
+        mlflow.set_experiment(experiment_name)
+        
+        # Start MLflow run
+        with mlflow.start_run() as run:
+            run_id = run.info.run_id
+            print(f"MLflow run ID: {run_id}")
+            
+            # Log configuration
+            mlflow.log_params(config)
+            mlflow.log_param("training_data_shape", f"{X_train.shape}")
+            mlflow.log_param("validation_data_shape", f"{X_val.shape}")
+            
+            # Initialize model based on configuration
+            model_type = config.get('model_type', 'sklearn')
+            algorithm = config.get('algorithm', 'random_forest')
+            hyperparameters = config.get('hyperparameters', {})
+            
+            print(f"Training {model_type} {algorithm} model...")
+            
+            if model_type == 'sklearn':
+                if algorithm == 'random_forest':
+                    model = RandomForestClassifier(**hyperparameters)
+                elif algorithm == 'gradient_boosting':
+                    model = GradientBoostingClassifier(**hyperparameters)
+                elif algorithm == 'logistic_regression':
+                    model = LogisticRegression(**hyperparameters)
+                elif algorithm == 'svm':
+                    model = SVC(**hyperparameters)
+                else:
+                    raise ValueError(f"Unsupported algorithm: {algorithm}")
+                
+                # Train model
+                print("Training model...")
+                model.fit(X_train, y_train)
+                
+                # Make predictions
+                y_train_pred = model.predict(X_train)
+                y_val_pred = model.predict(X_val)
+                
+                # Calculate metrics
+                train_accuracy = accuracy_score(y_train, y_train_pred)
+                val_accuracy = accuracy_score(y_val, y_val_pred)
+                val_precision = precision_score(y_val, y_val_pred, average='weighted')
+                val_recall = recall_score(y_val, y_val_pred, average='weighted')
+                val_f1 = f1_score(y_val, y_val_pred, average='weighted')
+                
+                # Calculate AUC if model supports predict_proba
+                try:
+                    y_val_proba = model.predict_proba(X_val)[:, 1]
+                    val_auc = roc_auc_score(y_val, y_val_proba)
+                except:
+                    val_auc = None
+                
+                metrics = {
+                    'train_accuracy': float(train_accuracy),
+                    'val_accuracy': float(val_accuracy),
+                    'val_precision': float(val_precision),
+                    'val_recall': float(val_recall),
+                    'val_f1': float(val_f1)
+                }
+                
+                if val_auc is not None:
+                    metrics['val_auc'] = float(val_auc)
+                
+                # Cross-validation
+                cv_folds = config.get('cross_validation_folds', 5)
+                if cv_folds > 1:
+                    print(f"Performing {cv_folds}-fold cross-validation...")
+                    cv_scores = cross_val_score(model, X_train, y_train, cv=cv_folds, scoring='accuracy')
+                    metrics['cv_mean_accuracy'] = float(cv_scores.mean())
+                    metrics['cv_std_accuracy'] = float(cv_scores.std())
+                    
+                    mlflow.log_metric("cv_mean_accuracy", cv_scores.mean())
+                    mlflow.log_metric("cv_std_accuracy", cv_scores.std())
+                
+                # Log metrics to MLflow
+                for metric_name, metric_value in metrics.items():
+                    mlflow.log_metric(metric_name, metric_value)
+                
+                # Log model to MLflow
+                mlflow.sklearn.log_model(
+                    model, 
+                    "model",
+                    registered_model_name=f"{algorithm}-{experiment_name}"
+                )
+                
+                # Save model locally
+                model_path = "/tmp/model/model.pkl"
+                joblib.dump(model, model_path)
+                
+                print(f"Model saved to: {model_path}")
+                print(f"Model metrics: {json.dumps(metrics, indent=2)}")
+                
+            else:
+                raise ValueError(f"Unsupported model type: {model_type}")
+            
+            # Feature importance (if available)
+            if hasattr(model, 'feature_importances_'):
+                feature_importance = {
+                    f"feature_{i}": float(importance) 
+                    for i, importance in enumerate(model.feature_importances_)
+                }
+                
+                # Log feature importance as artifacts
+                importance_file = "/tmp/model/feature_importance.json"
+                with open(importance_file, 'w') as f:
+                    json.dump(feature_importance, f, indent=2)
+                
+                mlflow.log_artifact(importance_file)
+                print("Feature importance logged")
+            
+            # Save outputs
+            with open("/tmp/outputs/model_path.txt", "w") as f:
+                f.write(model_path)
+            
+            with open("/tmp/outputs/model_metrics.json", "w") as f:
+                json.dump(metrics, f, indent=2)
+            
+            with open("/tmp/outputs/mlflow_run_id.txt", "w") as f:
+                f.write(run_id)
+            
+            print("Model training completed successfully!")
+      
+      env:
+      - name: AWS_DEFAULT_REGION
+        value: us-west-2
+      - name: PYTHONUNBUFFERED
+        value: "1"
+      - name: MLFLOW_TRACKING_URI
+        value: "http://mlflow-server:5000"
+      
+      resources:
+        requests:
+          memory: "4Gi"
+          cpu: "2000m"
+          nvidia.com/gpu: 0
+        limits:
+          memory: "8Gi"
+          cpu: "4000m"
+          nvidia.com/gpu: 1
+      
+      volumeMounts:
+      - name: shared-storage
+        mountPath: /shared
+    
+    volumes:
+    - name: shared-storage
+      persistentVolumeClaim:
+        claimName: ml-shared-pvc
+    
+    nodeSelector:
+      workload: ml-training
+    
+    tolerations:
+    - key: ml-training
+      value: "true"
+      effect: NoSchedule
+    - key: nvidia.com/gpu
+      value: "true"
+      effect: NoSchedule
